@@ -51,16 +51,16 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Python extension module
-pybind11_add_module(duckclaw src/bindings.cpp src/duckclaw.cpp)
-target_include_directories(duckclaw PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+pybind11_add_module(_duckclaw src/bindings.cpp src/duckclaw.cpp)
+target_include_directories(_duckclaw PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 if(TARGET duckdb_static)
-    target_include_directories(duckclaw PRIVATE ${duckdb_SOURCE_DIR}/src/include)
-    target_link_libraries(duckclaw PRIVATE duckdb_static)
+    target_include_directories(_duckclaw PRIVATE ${duckdb_SOURCE_DIR}/src/include)
+    target_link_libraries(_duckclaw PRIVATE duckdb_static)
 else()
-    target_link_libraries(duckclaw PRIVATE duckdb)
+    target_link_libraries(_duckclaw PRIVATE duckdb)
 endif()
 
 # Apple Silicon
 if(APPLE)
-    target_compile_options(duckclaw PRIVATE "-march=armv8.5-a+sha3+sm4")
+    target_compile_options(_duckclaw PRIVATE "-march=armv8.5-a+sha3+sm4")
 endif()

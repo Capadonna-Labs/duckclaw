@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64", "cmake>=3.18", "pybind11>=2.6"]
+requires = ["setuptools>=64", "wheel>=0.38", "cmake>=3.18", "pybind11>=2.6"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,3 +9,27 @@ description = "High-performance C++ analytical memory layer for sovereign AI age
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
+dependencies = [
+    "rich>=13.0.0",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=21,<22"]
+langgraph = []  # ya incluido en dependencias base
+agent = [
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-community>=0.3.0",
+]
+all = [
+    "python-telegram-bot>=21,<22",
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.2.0",
+    "langchain-community>=0.3.0",
+]

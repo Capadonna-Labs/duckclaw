@@ -4,7 +4,7 @@
 
 namespace py = pybind11;
 
-PYBIND11_MODULE(duckclaw, m) {
+PYBIND11_MODULE(_duckclaw, m) {
     m.doc() = "DuckClaw: High-performance analytical memory for IoTCoreLabs agents";
 
     py::class_<duckclaw::DuckClaw>(m, "DuckClaw")

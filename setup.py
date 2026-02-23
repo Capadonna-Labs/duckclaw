@@ -5,8 +5,9 @@ import sys
 from pathlib import Path
 
 import pybind11
-from setuptools import Extension, setup
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.command.develop import develop
 
 PLAT_TO_CMAKE = {
     "win32": "Win32",
@@ -84,12 +85,44 @@ class CMakeBuild(build_ext):
         )
 
 
+class DevelopNoPipSubprocess(develop):
+    """Editable install without calling 'python -m pip' in a subprocess.
+
+    Avoids 'No module named pip' when pip runs this inside a build-isolation env.
+    """
+    def run(self):
+        project_root = Path(__file__).resolve().parent
+        # In build-isolation, project is in a temp copy; .pth would point to wrong path
+        if "pip-build-env" in str(project_root) or "pip-modern-metadata" in str(project_root):
+            print(
+                "ERROR: Use editable install without build isolation:\n"
+                "  pip install -e \".[telegram]\" --no-build-isolation\n"
+                "Install build deps first: pip install cmake pybind11",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        self.initialize_options()
+        self.finalize_options()
+        # Build extension in-place so duckclaw/_duckclaw*.so lives under project root
+        build_ext_cmd = self.distribution.get_command_obj("build_ext")
+        build_ext_cmd.inplace = 1
+        self.run_command("build_ext")
+        # Register editable path: .pth in site-packages pointing at project root
+        install_dir = getattr(self, "install_dir", None)
+        if install_dir:
+            pth_path = Path(install_dir) / "__editable__.duckclaw-0.1.0.pth"
+            pth_path.parent.mkdir(parents=True, exist_ok=True)
+            pth_path.write_text(str(project_root) + "\n", encoding="utf-8")
+        # Skip parent run() so we never call subprocess pip
+
+
 setup(
     name="duckclaw",
     version="0.1.0",
     description="High-performance C++ analytical memory layer for sovereign AI agents.",
-    ext_modules=[CMakeExtension("duckclaw", sourcedir=Path(__file__).parent)],
-    cmdclass={"build_ext": CMakeBuild},
+    ext_modules=[CMakeExtension("duckclaw._duckclaw", sourcedir=Path(__file__).parent)],
+    cmdclass={"build_ext": CMakeBuild, "develop": DevelopNoPipSubprocess},
+    packages=find_packages(include=["duckclaw", "duckclaw.*"]),
     zip_safe=False,
     python_requires=">=3.9",
 )
