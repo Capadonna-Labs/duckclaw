@@ -204,6 +204,37 @@ En modo **langgraph** con cualquier proveedor LLM (openai, anthropic, ollama, ml
    ```
 3. El bot muestra en logs el proveedor y modelo activos al iniciar.
 
+### Dashboard de monitoreo
+
+Tras configurar con el wizard (`./scripts/install_duckclaw.sh`), puedes levantar un dashboard Streamlit que muestra la configuración guardada y los últimos mensajes de la tabla `telegram_messages`:
+
+```bash
+pip install -e ".[dashboard]" --no-build-isolation
+streamlit run scripts/dashboard.py
+```
+
+El dashboard lee la configuración en `~/.config/duckclaw/wizard_config.json` y, si hay `db_path`, abre la base DuckClaw y muestra tablas y mensajes recientes.
+
+### Trazabilidad con LangSmith
+
+En modo **langgraph**, puedes enviar trazas a [LangSmith](https://smith.langchain.com/) para depurar y analizar ejecuciones del agente (LLM, herramientas, pasos del grafo).
+
+1. Crea una cuenta en [smith.langchain.com](https://smith.langchain.com/) y obtén tu API key.
+2. Instala el extra que incluye LangSmith (ya está en `.[agent]` y `.[all]`):
+   ```bash
+   pip install -e ".[agent]" --no-build-isolation
+   ```
+3. Activa la trazabilidad y arranca el bot:
+   ```bash
+   export LANGCHAIN_TRACING_V2=true
+   export LANGCHAIN_API_KEY="tu_langsmith_api_key"
+   # Opcional: nombre del proyecto en LangSmith (por defecto: duckclaw)
+   export LANGCHAIN_PROJECT="duckclaw"
+   python examples/telegram_bot.py
+   ```
+
+Las ejecuciones del grafo se etiquetan con `duckclaw`, `telegram` y el proveedor LLM. Si no defines `LANGCHAIN_PROJECT`, se usa el proyecto `duckclaw` por defecto.
+
 ## License
 
 MIT License. See LICENSE for more information.

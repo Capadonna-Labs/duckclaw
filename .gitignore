@@ -23,9 +23,19 @@ cmake_install.cmake
 compile_commands.json
 Makefile
 
-# Local runtime data
+# Local runtime data and secrets
+.env
+.env.*
+!.env.example
+db/
 *.duckdb
+*.duckdb.wal
+*.wal
 
 # Security testing artifacts
 strix_runs/
 .security/
+
+# Local PM2 / deployment config (paths, secrets)
+ecosystem.config.cjs
+ecosystem.config.js

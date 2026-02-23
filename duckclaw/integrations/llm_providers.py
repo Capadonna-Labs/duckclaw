@@ -96,7 +96,9 @@ def build_duckclaw_tools(db: Any) -> list[Any]:
         try:
             return db.query(sql)
         except Exception as e:
-            return f"Error: {e}"
+            from duckclaw.utils import friendly_query_error
+            friendly = friendly_query_error(str(e))
+            return friendly if friendly else f"Error: {e}"
 
     def run_write_sql(sql: str) -> str:
         """Ejecuta INSERT, UPDATE o DELETE. No se permiten DROP, ALTER, CREATE, etc."""
@@ -251,7 +253,11 @@ def build_llm(
     if provider == "mlx":
         url = _ensure_url_scheme(base_url)
         if not url:
-            raise RuntimeError("Proveedor MLX requiere URL base del modelo (ej. http://127.0.0.1:8000/v1).")
+            url = "http://127.0.0.1:8080/v1"
+        # Compatibilidad con configuraciones antiguas del wizard (puerto 8000).
+        # El servidor MLX de DuckClaw usa 8080 por defecto.
+        if ":8000" in url:
+            url = url.replace(":8000", ":8080")
         # Always use the model id exposed by the server to avoid HF 401 (config name may be a label like "Slayer-8B-v1.1")
         mod = _mlx_model_id_from_server(url)
         if not mod:
@@ -364,10 +370,25 @@ def build_agent_graph(db: Any, llm: Optional[Any] = None) -> Any:
         return {"messages": messages + tool_messages}
 
     def set_reply_node(state: dict) -> dict:
+        import json
         messages = state.get("messages") or []
         last = messages[-1]
         reply = getattr(last, "content", None) or str(last)
-        return {"reply": _strip_eot(reply)}
+        reply = _strip_eot(reply)
+        # Si el modelo devolvió un tool call como texto (ej. Slayer-8B sin tool_calls nativos)
+        if reply.strip().startswith("{") and '"name"' in reply and ("parameters" in reply or '"args"' in reply):
+            try:
+                from duckclaw.utils import format_tool_reply
+                data = json.loads(reply)
+                name = data.get("name") or data.get("tool")
+                params = data.get("parameters") or data.get("args") or {}
+                if name and name in tools_by_name:
+                    result = tools_by_name[name].invoke(params)
+                    text = str(result) if result else "Listo."
+                    return {"reply": format_tool_reply(text)}
+            except (json.JSONDecodeError, TypeError, KeyError, Exception):
+                pass
+        return {"reply": reply}
 
     def should_continue(state: dict) -> str:
         messages = state.get("messages") or []

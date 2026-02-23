@@ -99,7 +99,9 @@ class TelegramBotBase(ABC):
 
     @abstractmethod
     def handle_message(self, update: Any) -> None:
-        """Implement bot-specific behavior after persistence."""
+        """Implement bot-specific behavior after persistence.
+        Si el bot usa un grafo LangGraph, debe extraer el texto del usuario del update
+        y pasarlo al grafo (p. ej. state['incoming']) para que el agente responda."""
         raise NotImplementedError
 
     def build_application(self, token: str) -> "Application":
