@@ -1,72 +1,95 @@
-# DuckClaw
+# DuckClaw 🦆⚔️
 
-High-performance C++ analytical memory layer for sovereign AI agents. Powered by [DuckDB](https://duckdb.org/), optimized for Apple Silicon (M4), and designed for high-precision structural memory in agentic workflows.
+High-performance C++ analytical memory layer for sovereign AI agents. 
 
-## Features
+## Overview
+DuckClaw is a native bridge between **DuckDB** and **Python**, optimized for **Apple Silicon (M4)**. It provides AI agents with a structured, high-speed analytical memory, allowing them to execute complex SQL queries and manage state with sub-millisecond latency.
 
-- **Native DuckDB**: Full SQL in-process, no external server
-- **Python bindings**: Simple API via pybind11 (`execute`, `query`, `get_version`)
-- **Structured results**: Queries return list-of-dicts (JSON-like) for easy integration
-- **File or in-memory**: Use a path for persistence or `:memory:` for ephemeral DBs
+Built by **IoTCoreLabs** for the Sovereign Agentic Ecosystem.
+
+## Core Features
+- **Native Performance**: Written in C++17 for minimal overhead.
+- **Sovereign by Design**: Operates entirely on local `.duckdb` files, ensuring 100% data privacy.
+- **Agent-Friendly**: Returns query results as **JSON** by default, ideal for LLM context injection and GRPO training loops.
+- **Optimized for M4**: Leverages Apple Silicon's unified memory architecture for zero-copy data transfers.
 
 ## Installation
 
-From the project root:
+### Prerequisites
+- macOS (Apple Silicon M1/M2/M3/M4)
+- CMake >= 3.18
+- DuckDB (`brew install duckdb`)
+- Pybind11 (`pip install pybind11`)
+
+### Build from source
+
+Con **pip** (evita el error “No module named pip” en entornos aislados usando `--no-build-isolation`):
+
+```bash
+git clone https://github.com/Arevalojj2020/duckclaw.git
+cd duckclaw
+pip install cmake pybind11   # dependencias de build en tu venv
+pip install -e . --no-build-isolation
+```
+
+Con **uv** (recomendado):
 
 ```bash
 uv pip install -e .
-# or
-pip install -e .
 ```
 
-**Requirements**: Python ≥3.9, CMake ≥3.18, C++17 toolchain, pybind11. DuckDB is bundled via the build.
+**Nota:** La primera compilación puede tardar **~5–7 minutos** porque se descarga y compila DuckDB. Para intentar usar DuckDB de Homebrew: `CMAKE_ARGS="-DDUCKDB_ROOT=/opt/homebrew/opt/duckdb" pip install -e . --no-build-isolation` (Intel: `/usr/local/opt/duckdb`).
 
-## Development workflow
-
-```bash
-# 1) Create/install editable package
-uv pip install -e .
-
-# 2) Run quick local test
-uv run python tests/test_duckclaw.py
-```
-
-If import errors appear, reinstall with `uv pip install -e .` and run the test again.
-
-## Quick start
+### Quick Start (Python)
 
 ```python
 import duckclaw
 
-# Persisted database (file) or ":memory:" for in-memory
-db = duckclaw.DuckClaw("my_db.duckdb")
+# Initialize Sovereign Memory
+db = duckclaw.DuckClaw("vfs/agent_memory.duckdb")
 
-# DDL and DML
-db.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER, name TEXT)")
-db.execute("INSERT INTO test VALUES (1, 'Slayer-8B'), (2, 'Navigator-3B')")
+# Execute DDL
+db.execute("CREATE TABLE IF NOT EXISTS telemetry (x DOUBLE, y DOUBLE, z DOUBLE, event TEXT)")
 
-# Query returns list of dicts
-result = db.query("SELECT * FROM test")
-print(db.get_version())  # e.g. v0.0.1
-print(result)             # [{'id': '1', 'name': 'Slayer-8B'}, {'id': '2', 'name': 'Navigator-3B'}]
+# Insert Data
+db.execute("INSERT INTO telemetry VALUES (100.5, 64.0, -200.1, 'Zombie Attack')")
+
+# Query Data (returns JSON string by default)
+results = db.query("SELECT * FROM telemetry")
+print(results)
+# Output: [{"x":"100.5","y":"64.0","z":"-200.1","event":"Zombie Attack"}]
 ```
 
-**Example output:**
+## Security Testing (Strix)
 
+Use Strix for manual security assessments against this repository.
+
+### Prerequisites
+- Docker running locally
+- Strix CLI installed
+- `STRIX_LLM` configured (example: `openai/gpt-5`)
+- `LLM_API_KEY` configured
+
+### Base command
+```bash
+strix -n --target ./
 ```
-Versión de DuckDB: v0.0.1
-Datos en DuckClaw: [{'id': '1', 'name': 'Slayer-8B'}, {'id': '2', 'name': 'Navigator-3B'}]
+
+### Standardized manual runs
+```bash
+# Quick triage
+./scripts/pentest_strix.sh quick
+
+# Deeper manual assessment
+./scripts/pentest_strix.sh deep
 ```
 
-## API
-
-| Method | Description |
-|--------|-------------|
-| `DuckClaw(path)` | Opens a DB at `path`; use `":memory:"` for in-memory. |
-| `execute(sql)` | Runs a statement with no result (CREATE, INSERT, UPDATE, etc.). |
-| `query(sql)` | Runs a SELECT and returns `list[dict[str, str]]`. |
-| `get_version()` | Returns the DuckDB version string. |
+### Artifacts and review criteria
+- CLI logs are written to `.security/pentest-logs/`
+- Strix run artifacts are written to `strix_runs/`
+- Prioritize remediation for `critical` and `high` findings first
+- Re-run the same mode after fixes to validate closure
 
 ## License
 
-MIT
+MIT License. See LICENSE for more information.

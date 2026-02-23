@@ -1,4 +1,4 @@
-l.DS_Store
+.DS_Store
 
 # Python cache/build artifacts
 __pycache__/
@@ -25,3 +25,7 @@ Makefile
 
 # Local runtime data
 *.duckdb
+
+# Security testing artifacts
+strix_runs/
+.security/
