@@ -1,4 +1,4 @@
-# DuckClaw 🦆⚔️
+# DuckClaw 🦆🦞
 
 High-performance C++ analytical memory layer for sovereign AI agents. 
 
