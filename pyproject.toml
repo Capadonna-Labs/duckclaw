@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "High-performance C++ analytical memory layer for sovereign AI agents."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "MIT"
+license = {text = "MIT"}
 dependencies = [
     "rich>=13.0.0",
 ]
