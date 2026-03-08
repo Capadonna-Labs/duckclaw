@@ -45,7 +45,7 @@ def run_sql(db: Any, query: str) -> str:
 
 
 def inspect_schema(db: Any) -> str:
-    """Retorna la estructura de la DB actual: tablas y columnas en JSON."""
+    """Retorna la estructura de la DB: lista de tablas con sus columnas en formato legible."""
     try:
         tables = json.loads(
             db.query(
@@ -53,18 +53,21 @@ def inspect_schema(db: Any) -> str:
                 "WHERE table_schema = 'main' ORDER BY table_name"
             )
         )
-        out = []
-        for t in tables if isinstance(tables, list) else []:
+        if not tables or not isinstance(tables, list):
+            return "No hay tablas en la base de datos."
+        lines = []
+        for t in tables:
             name = t.get("table_name") if isinstance(t, dict) else None
             if not name:
                 continue
             name_esc = str(name).replace("'", "''")
-            cols = db.query(
+            cols_raw = json.loads(db.query(
                 f"SELECT column_name, data_type FROM information_schema.columns "
                 f"WHERE table_schema = 'main' AND table_name = '{name_esc}' ORDER BY ordinal_position"
-            )
-            out.append({"table": name, "columns": json.loads(cols)})
-        return json.dumps(out, ensure_ascii=False)
+            ))
+            col_names = [c.get("column_name", "") for c in cols_raw if isinstance(c, dict)]
+            lines.append(f"- {name}: {', '.join(col_names)}")
+        return "Tablas disponibles:\n" + "\n".join(lines)
     except Exception as e:
         return json.dumps({"error": str(e)})
 

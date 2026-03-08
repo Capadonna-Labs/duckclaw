@@ -29,10 +29,24 @@ def main(args: list[str] | None = None) -> int:
     )
     deploy_parser.add_argument("--cwd", default=None, help="Working directory (default: current)")
 
+    status_parser = subparsers.add_parser("status", help="Show persistence service summary")  # noqa: F841
+    status_parser.add_argument(
+        "--provider",
+        choices=["pm2", "systemd", "windows", "auto"],
+        default="auto",
+        help="Provider to query (default: auto-detect)",
+    )
+    status_parser.add_argument(
+        "--name",
+        default=None,
+        help="Filter by service name (default: show all DuckClaw services)",
+    )
+
     parsed = parser.parse_args(args)
     if not parsed.subcommand:
         parser.print_help()
         return 0
+
     if parsed.subcommand == "deploy":
         from duckclaw.ops.manager import deploy
         msg = deploy(
@@ -47,6 +61,11 @@ def main(args: list[str] | None = None) -> int:
         low = msg.lower()
         failed = "error" in low or "unknown" in low or "not implemented" in low
         return 0 if not failed else 1
+
+    if parsed.subcommand == "status":
+        from duckclaw.ops.manager import status
+        return status(provider=parsed.provider, name=parsed.name)
+
     return 0
 
 

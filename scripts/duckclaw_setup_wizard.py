@@ -255,6 +255,200 @@ def _save_last_deploy_provider(provider: str) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def _pm2_app_status(name: str) -> str:
+    """Return PM2 status string for a named app, or 'no registrado'."""
+    try:
+        r = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            import json as _json
+            procs = _json.loads(r.stdout or "[]")
+            for p in procs:
+                if p.get("name") == name:
+                    return (p.get("pm2_env") or {}).get("status", "unknown")
+    except Exception:
+        pass
+    return "no registrado"
+
+
+def _pm2_edit_service_settings(
+    console: Console,
+    state: dict[str, Any],
+    repo_root: Path,
+    service_name: str,
+) -> None:
+    """Interactive sub-menu to edit and apply PM2 service configuration."""
+    _load_dotenv()
+    venv_python = str(repo_root / ".venv" / "bin" / "python3")
+    status = _pm2_app_status(service_name)
+
+    console.print(Panel(
+        f"Servicio: [bold]{service_name}[/]  Estado: [{_status_style(status)}]{status}[/]",
+        title="Editar servicio de persistencia",
+        border_style="cyan",
+    ))
+
+    # ── Mostrar config actual ──────────────────────────────────────────
+    cur = Table(title="Configuración actual", border_style="dim")
+    cur.add_column("Parámetro", style="dim cyan")
+    cur.add_column("Valor", style="white")
+    cur.add_row("Nombre app PM2", service_name)
+    cur.add_row("Modo bot", state.get("bot_mode", "langgraph"))
+    cur.add_row("DB path", state.get("db_path", "telegram.duckdb"))
+    cur.add_row("Proveedor LLM", state.get("llm_provider") or "none_llm")
+    cur.add_row("Modelo LLM", state.get("llm_model") or "-")
+    cur.add_row("Token", _censor_token(state.get("token", "")) or "(usa TELEGRAM_BOT_TOKEN de .env)")
+    console.print(cur)
+
+    if not Confirm.ask("¿Editar estos parámetros?", default=True):
+        return
+
+    # ── App name ──────────────────────────────────────────────────────
+    new_name = Prompt.ask("Nombre de la app PM2", default=service_name).strip() or service_name
+
+    # ── Bot mode ──────────────────────────────────────────────────────
+    t = Table(show_header=False, box=None)
+    t.add_column("", style="bold cyan", width=3)
+    t.add_column("")
+    t.add_row("1", "echo      – respuesta eco simple")
+    t.add_row("2", "langgraph – LangGraph + memoria bicameral (recomendado)")
+    console.print(t)
+    cur_mode = state.get("bot_mode", "langgraph")
+    mode_map = {"1": "echo", "2": "langgraph"}
+    mode_default = "1" if cur_mode == "echo" else "2"
+    mode_choice = Prompt.ask("Modo del bot", choices=["1", "2"], default=mode_default).strip()
+    new_mode = mode_map.get(mode_choice, "langgraph")
+    state["bot_mode"] = new_mode
+
+    # ── DB path ──────────────────────────────────────────────────────
+    cur_db = state.get("db_path", "telegram.duckdb")
+    new_db = Prompt.ask("Ruta DB (DuckDB)", default=cur_db).strip() or cur_db
+    state["db_path"] = new_db
+
+    # ── Token ────────────────────────────────────────────────────────
+    console.print("[dim]Déjalo en blanco para leer TELEGRAM_BOT_TOKEN desde .env[/]")
+    cur_tok = state.get("token", "")
+    new_tok = Prompt.ask(
+        "Token Telegram",
+        default=_censor_token(cur_tok) if cur_tok else "",
+    ).strip()
+    if new_tok and not new_tok.endswith("…") and "***" not in new_tok:
+        state["token"] = new_tok
+        _write_env_file(repo_root, "TELEGRAM_BOT_TOKEN", new_tok)
+
+    # ── LLM (solo si el modo lo requiere) ────────────────────────────
+    new_provider = state.get("llm_provider") or "none_llm"
+    new_model = state.get("llm_model") or ""
+    new_url = state.get("llm_base_url") or ""
+    if new_mode == "langgraph":
+        prov_table = Table(show_header=False, box=None)
+        for p in LLM_PROVIDERS:
+            prov_table.add_row(f"  {p}")
+        console.print(prov_table)
+        new_provider = Prompt.ask("Proveedor LLM", default=new_provider).strip().lower() or "none_llm"
+        new_model = Prompt.ask("Modelo LLM (opcional)", default=new_model or "").strip()
+        new_url = Prompt.ask("URL base LLM (opcional)", default=new_url or "").strip()
+        state["llm_provider"] = new_provider
+        state["llm_model"] = new_model
+        state["llm_base_url"] = new_url
+
+    # ── Resumen tras editar ───────────────────────────────────────────
+    summary = Table(title="Resumen del servicio", border_style="green")
+    summary.add_column("Parámetro", style="bold green")
+    summary.add_column("Valor", style="white")
+    summary.add_row("App PM2", new_name)
+    summary.add_row("Modo bot", new_mode)
+    summary.add_row("DB path", new_db)
+    summary.add_row("Token", _censor_token(state.get("token", "")) or "(usa TELEGRAM_BOT_TOKEN de .env)")
+    if new_mode == "langgraph":
+        summary.add_row("Proveedor LLM", new_provider)
+        summary.add_row("Modelo LLM", new_model or "-")
+        summary.add_row("URL base LLM", new_url or "-")
+    console.print(summary)
+
+    # ── Generar ecosystem.core.config.cjs ────────────────────────────
+    if not Confirm.ask("¿Generar/actualizar ecosystem.core.config.cjs?", default=True):
+        return
+
+    config_path = repo_root / "ecosystem.core.config.cjs"
+    cwd = str(repo_root)
+    config_content = f"""/**
+ * PM2 config for DuckClaw Telegram bot (generated by wizard).
+ * Start: pm2 start ecosystem.core.config.cjs
+ * Token: guardado en .env (auto-cargado por el bot al iniciar).
+ */
+module.exports = {{
+  apps: [
+    {{
+      name: "{new_name}",
+      script: "{venv_python}",
+      args: "-m core.integrations.telegram_bot",
+      cwd: "{cwd}",
+      interpreter: "none",
+      autorestart: true,
+      watch: false,
+      max_restarts: 10,
+      env: {{
+        PYTHONPATH: "{cwd}",
+        DUCKCLAW_DB_PATH: "{new_db}",
+        DUCKCLAW_BOT_MODE: "{new_mode}",
+        DUCKCLAW_LLM_PROVIDER: "{new_provider}",
+        DUCKCLAW_LLM_MODEL: "{new_model}",
+        DUCKCLAW_LLM_BASE_URL: "{new_url}",
+      }},
+    }},
+  ],
+}};
+"""
+    config_path.write_text(config_content, encoding="utf-8")
+    console.print(f"[green]✓[/] Config generado: [dim]{config_path}[/]")
+
+    # ── Acción PM2 ────────────────────────────────────────────────────
+    action_table = Table(show_header=False, box=None)
+    action_table.add_column("", style="bold cyan", width=3)
+    action_table.add_column("")
+    action_table.add_row("1", f"Reiniciar  {new_name}")
+    action_table.add_row("2", f"Iniciar    {new_name}")
+    action_table.add_row("3", f"Detener    {new_name}")
+    action_table.add_row("s", "Omitir (aplicar cambios más tarde)")
+    console.print(action_table)
+    action = Prompt.ask("Acción PM2", choices=["1", "2", "3", "s"], default="s").strip().lower()
+    if action == "1":
+        subprocess.run(["pm2", "restart", new_name, "--update-env"], timeout=10)
+        console.print(f"[green]✓[/] Reiniciado.")
+    elif action == "2":
+        subprocess.run(["pm2", "start", str(config_path)], timeout=15)
+        console.print(f"[green]✓[/] Iniciado.")
+    elif action == "3":
+        subprocess.run(["pm2", "stop", new_name], timeout=10)
+        console.print(f"[green]✓[/] Detenido.")
+
+
+def _write_env_file(repo_root: Path, key: str, value: str) -> None:
+    """Write or update a key=value in .env (project root)."""
+    env_path = repo_root / ".env"
+    lines: list[str] = []
+    found = False
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(f"{key}="):
+                lines.append(f'{key}="{value}"')
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f'{key}="{value}"')
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _status_style(status: str) -> str:
+    s = (status or "").strip().lower()
+    if s == "online":
+        return "green"
+    if s in ("stopped", "no registrado", "unknown"):
+        return "yellow"
+    return "red"
+
+
 def save_config(
     mode: str,
     channel: str,
@@ -532,18 +726,11 @@ def _run_section(
 ) -> tuple[bool, str, str | None]:
     """Ejecuta la sección. Devuelve (éxito, mensaje_error, nav). nav in (next, prev, quit) o None."""
     if section_id == "welcome":
-        console.print(
-            Panel(
-                "[bold green]DuckClaw 🦆⚔️[/]",
-                border_style="green",
-            )
-        )
         if state.get("_from_saved"):
             console.print(f"[dim]Preferencias cargadas desde {_config_path()}.[/]")
             if Confirm.ask("¿Usar estas preferencias y saltar al resumen?", default=True):
                 state["_skip_to_summary"] = True
                 state["_used_preferences_skip"] = True
-                _load_dotenv()
                 state["token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
         return True, "", None
 
@@ -727,6 +914,20 @@ def _run_section(
         _load_dotenv()
         if not state.get("token"):
             state["token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+
+        # ── Edición de servicio (salto desde welcome) ──────────────────────
+        if state.get("_edit_service"):
+            svc_name = state.pop("_edit_service_name", DEPLOY_SERVICE_NAME)
+            state.pop("_edit_service", None)
+            _pm2_edit_service_settings(console, state, repo_root, svc_name)
+            run_now, nav = _confirm_with_nav(console, "¿Arrancar el bot ahora?", default=False)
+            if nav is not None:
+                return True, "", nav
+            if not run_now:
+                console.print("[dim]Configuración guardada. Ejecuta el bot cuando quieras.[/]")
+                return True, "", None
+            # Continúa hacia el lanzamiento directo (cae al final de save_launch)
+
         console.print(Panel("Guardar y lanzar", title="Finalizar", border_style="green"))
         if not state.get("_used_preferences_skip"):
             if Confirm.ask("¿Guardar esta configuración para la próxima vez?", default=True):
@@ -793,7 +994,7 @@ def _run_section(
                 msg = deploy(
                     name=DEPLOY_SERVICE_NAME,
                     provider=deploy_provider,
-                    command="-m duckclaw.agents.telegram_bot",
+                    command="-m core.integrations.telegram_bot",
                     cwd=str(repo_root),
                 )
                 console.print(Panel(msg, title="duckops deploy", border_style="blue"))
@@ -857,9 +1058,12 @@ def _run_section(
                 if send_ls:
                     env["DUCKCLAW_SEND_TO_LANGSMITH"] = "true"
         console.print(Panel("Arrancando bot en modo polling...", border_style="cyan"))
+        env["PYTHONPATH"] = str(repo_root) + (
+            os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else ""
+        )
         try:
             ret = subprocess.call(
-                [sys.executable, "-m", "duckclaw.agents.telegram_bot"],
+                [sys.executable, "-m", "core.integrations.telegram_bot"],
                 cwd=str(repo_root),
                 env=env,
             )
@@ -884,7 +1088,86 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     bot_script = repo_root / "examples" / "telegram_bot.py"
 
-    # Siempre revisar primero el JSON de preferencias; evita configurar todo desde 0
+    try:
+      return _main_inner(console, repo_root, bot_script)
+    except KeyboardInterrupt:
+        console.print("\n[dim]Interrumpido (Ctrl+C).[/]")
+        return 130
+
+
+def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
+    _load_dotenv()
+    # ── PASO 0: Detectar servicio de persistencia (SIEMPRE lo primero) ───
+    console.print(Panel("[bold green]DuckClaw 🦆⚔️[/]", border_style="green"))
+    if shutil.which("pm2") is not None:
+        # Buscar cualquier proceso PM2 registrado (no solo nombres conocidos)
+        pm2_procs: list[dict[str, Any]] = []
+        try:
+            r = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                import json as _json
+                pm2_procs = _json.loads(r.stdout or "[]")
+                if not isinstance(pm2_procs, list):
+                    pm2_procs = []
+        except Exception:
+            pm2_procs = []
+
+        # Mostrar tabla de procesos detectados
+        if pm2_procs:
+            t = Table(title="Servicios PM2 detectados", border_style="cyan")
+            t.add_column("Nombre", style="bold cyan")
+            t.add_column("Estado", style="white")
+            t.add_column("Reinicios", style="dim")
+            for p in pm2_procs:
+                name = p.get("name", "?")
+                status = (p.get("pm2_env") or {}).get("status", "?")
+                restarts = str((p.get("pm2_env") or {}).get("restart_time", "-"))
+                color = _status_style(status)
+                t.add_row(name, f"[{color}]{status}[/]", restarts)
+            console.print(t)
+        else:
+            console.print("[dim]PM2 disponible. No hay procesos registrados aún.[/]")
+
+        console.print(Panel(
+            "Se detectó PM2 en este equipo. Puedes gestionar o configurar\n"
+            "el servicio de persistencia del bot sin pasar por la configuración completa.",
+            title="Servicio de persistencia",
+            border_style="cyan",
+        ))
+        edit_svc, _ = _confirm_with_nav(
+            console,
+            "¿Gestionar servicio de persistencia (omitir configuración completa)?",
+            default=False,
+        )
+        if edit_svc:
+            # Elegir qué proceso editar si hay varios
+            found_svc = DEPLOY_SERVICE_NAME
+            if pm2_procs:
+                if len(pm2_procs) == 1:
+                    found_svc = pm2_procs[0].get("name", DEPLOY_SERVICE_NAME)
+                else:
+                    names = [p.get("name", "") for p in pm2_procs if p.get("name")]
+                    name_table = Table(show_header=False, box=None)
+                    for i, n in enumerate(names, 1):
+                        name_table.add_row(str(i), n)
+                    console.print(name_table)
+                    choice = Prompt.ask(
+                        "Selecciona el servicio a editar",
+                        choices=[str(i) for i in range(1, len(names) + 1)],
+                        default="1",
+                    )
+                    found_svc = names[int(choice) - 1]
+            # Cargar config guardada como base
+            saved_for_edit = load_config() or {}
+            svc_state: dict[str, Any] = {}
+            for k in CONFIG_KEYS:
+                if k in saved_for_edit:
+                    svc_state[k] = saved_for_edit[k]
+            svc_state["token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+            _pm2_edit_service_settings(console, svc_state, repo_root, found_svc)
+            return 0
+
+    # ── PASO 1: Cargar configuración guardada ─────────────────────────────
     state: dict[str, Any] = {}
     saved = load_config()
     if saved:
@@ -905,64 +1188,60 @@ def main() -> int:
     state.setdefault("send_to_langsmith", True)
     idx = 0
 
-    try:
-        while True:
-            section_id = SECTION_IDS[idx]
-            if section_id == "provider" and state.get("bot_mode") != "langgraph":
+    while True:
+        section_id = SECTION_IDS[idx]
+        if section_id == "provider" and state.get("bot_mode") != "langgraph":
+            idx = _next_index(idx, state) or idx
+            continue
+        if section_id == "grpo_traces" and state.get("bot_mode") != "langgraph":
+            idx = _next_index(idx, state) or idx
+            continue
+        if section_id == "validate_provider" and state.get("bot_mode") != "langgraph":
+            idx = _next_index(idx, state) or idx
+            continue
+
+        num, total = _section_progress(idx, state)
+        titles = {
+            "welcome": "",
+            "mode": "Modo",
+            "channel": "Canal",
+            "bot_mode": "Modo del bot",
+            "provider": "Model provider",
+            "deps": "Dependencias",
+            "token": "Token",
+            "db_path": "DB",
+            "grpo_traces": "Trazas GRPO",
+            "validate_provider": "Validar proveedor",
+            "summary": "Resumen",
+            "save_launch": "Finalizar",
+        }
+        console.print(f"[bold cyan]Sección {num}/{total}: {titles.get(section_id, section_id)}[/]")
+        console.print()
+        ok, err, nav = _run_section(section_id, console, state, repo_root, bot_script)
+        if not ok:
+            console.print(Panel(err, title="❌ Error", border_style="red"))
+
+        if section_id == "welcome":
+            if state.get("_skip_to_summary"):
+                idx = SECTION_IDS.index("summary")
+                state.pop("_skip_to_summary", None)
+            else:
                 idx = _next_index(idx, state) or idx
-                continue
-            if section_id == "grpo_traces" and state.get("bot_mode") != "langgraph":
-                idx = _next_index(idx, state) or idx
-                continue
-            if section_id == "validate_provider" and state.get("bot_mode") != "langgraph":
-                idx = _next_index(idx, state) or idx
-                continue
+            continue
 
-            num, total = _section_progress(idx, state)
-            titles = {
-                "welcome": "",
-                "mode": "Modo",
-                "channel": "Canal",
-                "bot_mode": "Modo del bot",
-                "provider": "Model provider",
-                "deps": "Dependencias",
-                "token": "Token",
-                "db_path": "DB",
-                "grpo_traces": "Trazas GRPO",
-                "validate_provider": "Validar proveedor",
-                "summary": "Resumen",
-                "save_launch": "Finalizar",
-            }
-            console.print(f"[bold cyan]Sección {num}/{total}: {titles.get(section_id, section_id)}[/]")
-            console.print()
-            ok, err, nav = _run_section(section_id, console, state, repo_root, bot_script)
-            if not ok:
-                console.print(Panel(err, title="❌ Error", border_style="red"))
+        if nav == NAV_QUIT:
+            if Confirm.ask("¿Salir sin arrancar el bot?", default=False):
+                return 0
+            continue
+        if nav == NAV_PREV:
+            idx = _prev_index(idx, state)
+            continue
+        next_i = _next_index(idx, state)
+        if next_i is None:
+            break
+        idx = next_i
 
-            if section_id == "welcome":
-                if state.get("_skip_to_summary"):
-                    idx = SECTION_IDS.index("summary")
-                    state.pop("_skip_to_summary", None)
-                else:
-                    idx = _next_index(idx, state) or idx
-                continue
-
-            if nav == NAV_QUIT:
-                if Confirm.ask("¿Salir sin arrancar el bot?", default=False):
-                    return 0
-                continue
-            if nav == NAV_PREV:
-                idx = _prev_index(idx, state)
-                continue
-            next_i = _next_index(idx, state)
-            if next_i is None:
-                break
-            idx = next_i
-
-        return 0
-    except KeyboardInterrupt:
-        console.print("\n[dim]Interrumpido (Ctrl+C).[/]")
-        return 130
+    return 0
 
 
 if __name__ == "__main__":

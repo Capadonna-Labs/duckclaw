@@ -338,6 +338,25 @@ def _run_bot() -> None:
             if isinstance(send_ls, str):
                 send_ls = str(send_ls).lower() in ("true", "1", "yes", "y", "sí", "si")
 
+            # Resolver el model ID — misma prioridad que build_llm para consistencia
+            def _resolve_display_model(provider: str, model: str, base_url: str) -> str:
+                if provider == "mlx":
+                    # 1. MLX_MODEL_ID del env (ruta local — más confiable)
+                    mid = os.environ.get("MLX_MODEL_ID", "").strip()
+                    if not mid:
+                        mid = os.environ.get("MLX_MODEL_PATH", "").strip()
+                    if mid:
+                        # Mostrar solo el nombre del directorio para brevedad
+                        name = mid.rstrip("/").rsplit("/", 1)[-1]
+                        return f"mlx:{name}"
+                    return f"mlx:{model or 'local'}"
+                if model:
+                    return f"{provider}:{model}"
+                return provider or "none_llm"
+
+            display_model = _resolve_display_model(llm_provider, llm_model, llm_base_url)
+            _log(f"🤔 [{display_model}] pensando...")
+
             t0 = time.perf_counter()
             try:
                 graph = _build_entry_router(
@@ -386,18 +405,21 @@ def _run_bot() -> None:
             except Exception as e:
                 _log(f"🖼️ Error extrayendo archivos: {e}")
             # Log lo que realmente se envía (para que coincida con Telegram)
+            _log_preview = (text_to_send or "")[:200].replace("\n", " ")
+            if len(text_to_send or "") > 200:
+                _log_preview += "…"
             if image_paths:
                 try:
                     from duckclaw.utils.format import caption_for_photo as _cap
                     caption_preview = _cap(reply, image_paths)
                     caption_preview = _format_reply_for_telegram(caption_preview or "📊 Gráfica generada", max_len=600)
-                    _log(f"📤 Respuesta chat={chat_id} ({elapsed_ms} ms): [imagen]\n{caption_preview}")
+                    _log(f"📤 [{display_model}] chat={chat_id} ({elapsed_ms}ms): [imagen] {caption_preview[:120]}")
                 except Exception:
-                    _log(f"📤 Respuesta chat={chat_id} ({elapsed_ms} ms): [imagen]")
+                    _log(f"📤 [{display_model}] chat={chat_id} ({elapsed_ms}ms): [imagen]")
             elif excel_paths or markdown_paths:
-                _log(f"📤 Respuesta chat={chat_id} ({elapsed_ms} ms): [documento]\n{text_to_send[:300]}...")
+                _log(f"📤 [{display_model}] chat={chat_id} ({elapsed_ms}ms): [documento] {_log_preview}")
             else:
-                _log(f"📤 Respuesta chat={chat_id} ({elapsed_ms} ms):\n{text_to_send}")
+                _log(f"📤 [{display_model}] chat={chat_id} ({elapsed_ms}ms): {_log_preview}")
             def _user_wants_excel_only() -> bool:
                 """True si el usuario pidió explícitamente Excel (exportar a excel) y no reporte/informe MD."""
                 t = (text or "").lower()

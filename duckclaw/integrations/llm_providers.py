@@ -145,20 +145,41 @@ def _ensure_url_scheme(url: str) -> str:
     return "http://" + u
 
 
-def _mlx_model_id_from_server(base_url: str) -> str | None:
-    """GET base_url/models and return the first model id. Returns None on any error."""
+def _mlx_model_id_from_server(base_url: str, retries: int = 2) -> str | None:
+    """GET base_url/models and return the first model id. Retries on failure. Returns None on any error."""
     import urllib.request
+    import time
     url = (base_url or "").rstrip("/") + "/models"
-    try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = __import__("json").loads(resp.read().decode())
-            models = data.get("data") or []
-            if models and isinstance(models[0], dict):
-                return (models[0].get("id") or "").strip() or None
-    except Exception:
-        pass
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = __import__("json").loads(resp.read().decode())
+                models = data.get("data") or []
+                if models and isinstance(models[0], dict):
+                    mid = (models[0].get("id") or "").strip()
+                    return mid or None
+        except Exception:
+            if attempt < retries:
+                time.sleep(1)
     return None
+
+
+# Patterns that look like cloud/remote model IDs (not safe for local MLX server)
+_CLOUD_MODEL_PATTERNS = re.compile(
+    r"^(deepseek|gpt-|claude-|gemini-|mistral-api|command-|llama-api)",
+    re.IGNORECASE,
+)
+
+
+def _is_local_model_name(name: str) -> bool:
+    """Return True if name is safe to pass to a local MLX server (not a cloud-only model ID)."""
+    if not name:
+        return False
+    # Block known cloud-only model prefixes (they'd trigger HF/API downloads)
+    if _CLOUD_MODEL_PATTERNS.match(name):
+        return False
+    return True
 
 
 def build_llm(
@@ -303,13 +324,27 @@ def build_llm(
         if not url:
             url = "http://127.0.0.1:8080/v1"
         # Compatibilidad con configuraciones antiguas del wizard (puerto 8000).
-        # El servidor MLX de DuckClaw usa 8080 por defecto.
         if ":8000" in url:
             url = url.replace(":8000", ":8080")
-        # Always use the model id exposed by the server to avoid HF 401 (config name may be a label like "Slayer-8B-v1.1")
-        mod = _mlx_model_id_from_server(url)
+        # Priority:
+        # 1. MLX_MODEL_ID env var (ruta local — más confiable, evita descargas de HF)
+        # 2. MLX_MODEL_PATH env var (ruta del modelo cargado)
+        # 3. Consulta /v1/models al servidor (puede retornar IDs de HF que causan descargas)
+        # 4. Error claro
+        mod = os.environ.get("MLX_MODEL_ID", "").strip() or None
         if not mod:
-            mod = (model or "").strip() or "default"
+            mod = os.environ.get("MLX_MODEL_PATH", "").strip() or None
+        if not mod:
+            mod = _mlx_model_id_from_server(url)
+            # Reject HF-style IDs that would trigger a download on the local server
+            if mod and "/" in mod and not mod.startswith("/"):
+                mod = None
+        if not mod:
+            raise RuntimeError(
+                "No se pudo determinar el model ID del servidor MLX. "
+                "Agrega MLX_MODEL_ID=/ruta/al/modelo en .env, "
+                "o verifica que el servidor esté corriendo en " + url
+            )
         try:
             from langchain_openai import ChatOpenAI
         except ImportError as e:

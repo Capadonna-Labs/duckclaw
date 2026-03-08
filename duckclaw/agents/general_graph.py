@@ -37,8 +37,11 @@ def build_general_graph(
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
     prompt = system_prompt or (
-        "Eres un asistente útil con acceso a una base de datos. "
-        "Usa las herramientas cuando sea necesario."
+        "Eres un asistente útil con acceso a una base de datos DuckDB. "
+        "Cuando uses una herramienta, interpreta el resultado y responde en lenguaje natural claro y conciso. "
+        "Nunca copies el resultado crudo de una herramienta. "
+        "Si hay una lista de tablas, menciónalas de forma legible. "
+        "Si hay datos de una consulta, preséntelos de forma organizada."
     )
     tools = [
         StructuredTool.from_function(

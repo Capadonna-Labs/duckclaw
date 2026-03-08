@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# Repo root (absoluto) y path para importar duckclaw
+# Repo root (absoluto) y path para importar core
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(REPO_ROOT))
@@ -23,9 +23,9 @@ def main() -> int:
     db_path_abs = str(STORE_DB_PATH)
 
     try:
-        import duckclaw
+        import core as duckclaw
     except ImportError:
-        print("Error: duckclaw no instalado. Ejecuta: pip install -e . --no-build-isolation", file=sys.stderr)
+        print("Error: paquete 'core' no encontrado. Asegúrate de ejecutar desde la raíz del repo.", file=sys.stderr)
         return 1
 
     db = duckclaw.DuckClaw(db_path_abs)
