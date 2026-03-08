@@ -1,7 +1,7 @@
-import duckclaw
+import core
 
 # Base en memoria para que cada ejecución sea reproducible (sin datos acumulados)
-db = duckclaw.DuckClaw(":memory:")
+db = core.DuckClaw(":memory:")
 
 # Crear tabla e insertar
 db.execute("CREATE TABLE test (id INTEGER, name TEXT)")

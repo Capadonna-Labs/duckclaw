@@ -10,11 +10,11 @@ import json
 import sys
 from pathlib import Path
 
-# Permitir importar duckclaw cuando se ejecuta desde repo root
+# Permitir importar core cuando se ejecuta desde repo root
 if __name__ == "__main__" and (repo_root := Path(__file__).resolve().parent.parent.parent) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
-from duckclaw.utils import SlayerConsole
+from core.utils import SlayerConsole
 
 
 def run_agent(db_path: str = ":memory:") -> None:
@@ -23,8 +23,8 @@ def run_agent(db_path: str = ":memory:") -> None:
     console.print_welcome_banner()
 
     try:
-        import duckclaw
-        db = duckclaw.DuckClaw(db_path)
+        import core
+        db = core.DuckClaw(db_path)
     except ImportError:
         console.print_error("DuckClaw no instalado. Instala con: pip install -e . --no-build-isolation")
         return

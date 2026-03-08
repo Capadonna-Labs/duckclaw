@@ -113,7 +113,7 @@ class TelegramBotBase(ABC):
         except ImportError as exc:
             raise ImportError(
                 "Telegram integration requires optional dependency "
-                "`python-telegram-bot`. Install with: pip install 'duckclaw[telegram]'"
+                "`python-telegram-bot`. Install with: pip install 'core[telegram]'"
             ) from exc
 
         app = ApplicationBuilder().token(token).build()

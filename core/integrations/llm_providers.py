@@ -298,11 +298,12 @@ def build_agent_graph(db: Any, llm: Optional[Any] = None) -> Any:
             "WHERE text IS NOT NULL AND text != '' "
             "ORDER BY received_at DESC LIMIT 5"
         )
-        reply = (
-            f"Recibí: {incoming or '(sin texto)'}. "
-            f"Contexto reciente en memoria: {memory_json}"
-        )
-        return {"reply": reply}
+        bicameral_context = (state.get("bicameral_context") or "").strip()
+        parts = [f"Recibí: {incoming or '(sin texto)'}."]
+        parts.append(f"Contexto reciente en memoria: {memory_json}")
+        if bicameral_context:
+            parts.append(f"Memoria bicameral:\n{bicameral_context}")
+        return {"reply": " ".join(parts)}
 
     graph = StateGraph(dict)
     if llm is None:
@@ -325,12 +326,19 @@ def build_agent_graph(db: Any, llm: Optional[Any] = None) -> Any:
             "WHERE text IS NOT NULL AND text != '' "
             "ORDER BY received_at DESC LIMIT 5"
         )
+        bicameral_context = (state.get("bicameral_context") or "").strip()
+        bicameral_section = (
+            f"\n\n### Memoria bicameral (OLAP + grafo semántico):\n{bicameral_context}"
+            if bicameral_context
+            else ""
+        )
         system = (
             "Eres un asistente útil. Tienes acceso a una base de datos DuckDB a través de herramientas. "
             "Herramientas: list_tables (listar tablas), describe_table (columnas de una tabla), "
             "run_read_sql (solo SELECT/WITH/SHOW/DESCRIBE), run_write_sql (INSERT/UPDATE/DELETE). "
             "Usa las herramientas cuando el usuario pregunte por datos, tablas o quiera insertar/actualizar/borrar. "
-            "Responde de forma breve y clara. Contexto reciente en memoria: " + (memory_json or "[]")
+            "Responde de forma breve y clara. "
+            "Contexto reciente en memoria: " + (memory_json or "[]") + bicameral_section
         )
         user_content = f"Mensaje actual: {incoming}"
         return {"messages": [SystemMessage(content=system), HumanMessage(content=user_content)]}

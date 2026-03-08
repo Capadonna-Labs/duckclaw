@@ -1,7 +1,7 @@
 """Tests for DuckClaw LLM integration: guardrails and tools (safe_write)."""
 
-import duckclaw
-from duckclaw.integrations.llm_providers import (
+import core
+from core.integrations.llm_providers import (
     build_agent_graph,
     build_duckclaw_tools,
     _validate_read_sql,
@@ -51,7 +51,7 @@ def test_validate_write_sql() -> None:
 
 
 def test_tools_list_describe_read_write() -> None:
-    db = duckclaw.DuckClaw(":memory:")
+    db = core.DuckClaw(":memory:")
     db.execute("CREATE TABLE test (id INTEGER, name TEXT)")
     db.execute("INSERT INTO test VALUES (1, 'a'), (2, 'b')")
     tools = build_duckclaw_tools(db)
@@ -77,7 +77,7 @@ def test_tools_list_describe_read_write() -> None:
 
 
 def test_tools_block_ddl() -> None:
-    db = duckclaw.DuckClaw(":memory:")
+    db = core.DuckClaw(":memory:")
     db.execute("CREATE TABLE t (id INT)")
     tools = build_duckclaw_tools(db)
     run_write = next(t for t in tools if t.name == "run_write_sql")
@@ -92,7 +92,7 @@ def test_tools_block_ddl() -> None:
 
 
 def test_build_agent_graph_none_llm() -> None:
-    db = duckclaw.DuckClaw(":memory:")
+    db = core.DuckClaw(":memory:")
     db.execute(
         "CREATE TABLE telegram_messages (message_id BIGINT, chat_id BIGINT, user_id BIGINT, "
         "username TEXT, text TEXT, raw_update_json TEXT, received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"

@@ -22,7 +22,8 @@ Flow:
 
 Required environment variables:
 - `TELEGRAM_BOT_TOKEN`
-- `DUCKCLAW_DB_PATH` (optional, defaults to `telegram.duckdb`)
+- `DUCKCLAW_DB_PATH` (optional, defaults to `db/telegram.duckdb`)
+- `DUCKCLAW_BOT_MODE` (optional, defaults to `bicameral`; options: `bicameral`, `bicameral_langgraph`, `langgraph`, `echo`)
 
 ## 2) Install dependencies
 
@@ -50,15 +51,15 @@ uv pip install -e ".[telegram]"
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your_bot_token"
-export DUCKCLAW_DB_PATH="telegram.duckdb"
-python examples/telegram_bot.py
+export DUCKCLAW_DB_PATH="db/telegram.duckdb"
+python -m duckclaw.integrations.telegram_bot
 ```
 
 ## 4) Validate persisted messages
 
 ```python
 import duckclaw
-db = duckclaw.DuckClaw("telegram.duckdb")
+db = duckclaw.DuckClaw("db/telegram.duckdb")
 print(db.query("SELECT chat_id, username, text, received_at FROM telegram_messages ORDER BY received_at DESC LIMIT 20"))
 ```
 

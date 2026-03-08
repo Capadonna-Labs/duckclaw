@@ -103,14 +103,14 @@ class DevelopNoPipSubprocess(develop):
             sys.exit(1)
         self.initialize_options()
         self.finalize_options()
-        # Build extension in-place so duckclaw/_duckclaw*.so lives under project root
+        # Build extension in-place so core/_duckclaw*.so lives under project root
         build_ext_cmd = self.distribution.get_command_obj("build_ext")
         build_ext_cmd.inplace = 1
         self.run_command("build_ext")
         # Register editable path: .pth in site-packages pointing at project root
         install_dir = getattr(self, "install_dir", None)
         if install_dir:
-            pth_path = Path(install_dir) / "__editable__.duckclaw-0.1.0.pth"
+            pth_path = Path(install_dir) / "__editable__.core-0.1.0.pth"
             pth_path.parent.mkdir(parents=True, exist_ok=True)
             pth_path.write_text(str(project_root) + "\n", encoding="utf-8")
         # Skip parent run() so we never call subprocess pip
@@ -120,9 +120,9 @@ setup(
     name="duckclaw",
     version="0.1.0",
     description="High-performance C++ analytical memory layer for sovereign AI agents.",
-    ext_modules=[CMakeExtension("duckclaw._duckclaw", sourcedir=Path(__file__).parent)],
+    ext_modules=[CMakeExtension("core._duckclaw", sourcedir=Path(__file__).parent)],
     cmdclass={"build_ext": CMakeBuild, "develop": DevelopNoPipSubprocess},
-    packages=find_packages(include=["duckclaw", "duckclaw.*"]),
+    packages=find_packages(include=["core", "core.*"]),
     zip_safe=False,
     python_requires=">=3.9",
 )

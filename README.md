@@ -109,11 +109,11 @@ pip install -e ".[telegram]" --no-build-isolation
 1. Create and export your token:
    ```bash
    export TELEGRAM_BOT_TOKEN="your_bot_token"
-   export DUCKCLAW_DB_PATH="telegram.duckdb"
+   export DUCKCLAW_DB_PATH="db/telegram.duckdb"
    ```
 2. Run the runnable example:
    ```bash
-   python examples/telegram_bot.py
+   python -m duckclaw.integrations.telegram_bot
    ```
    Or run the one-line interactive wizard (asks token input if missing):
    ```bash
@@ -132,7 +132,7 @@ pip install -e ".[telegram]" --no-build-isolation
 4. Validate persistence in DuckClaw:
    ```python
    import duckclaw
-   db = duckclaw.DuckClaw("telegram.duckdb")
+   db = duckclaw.DuckClaw("db/telegram.duckdb")
    print(db.query("SELECT chat_id, username, text, received_at FROM telegram_messages ORDER BY received_at DESC LIMIT 10"))
    ```
 
@@ -147,7 +147,13 @@ For complete setup and troubleshooting, see `docs/telegram-integration.md`.
 
 ## Bot inteligente (LangGraph y proveedores)
 
-El wizard y el ejemplo de Telegram permiten elegir un **modo del bot** (echo o langgraph) y, en modo langgraph, un **proveedor** para respuestas inteligentes:
+El wizard y el ejemplo de Telegram permiten elegir un **modo del bot** (**bicameral** por defecto), incluyendo:
+- `bicameral`: contexto DuckDB bicameral (SQL + PGQ/fallback)
+- `bicameral_langgraph`: bicameral + síntesis final con LLM
+- `langgraph`: flujo clásico con herramientas
+- `echo`: eco simple
+
+En los modos con proveedor (`langgraph` y `bicameral_langgraph`), también puedes elegir un **proveedor** para respuestas inteligentes:
 
 | Proveedor     | Descripción                    | Variables de entorno / configuración                    |
 |---------------|--------------------------------|---------------------------------------------------------|
@@ -181,7 +187,7 @@ En modo **langgraph** con cualquier proveedor LLM (openai, anthropic, ollama, ml
 
 ### Instalación por proveedor
 
-- Solo Telegram (echo o langgraph con `none_llm`). LangGraph viene incluido en el paquete:
+- Solo Telegram (bicameral/echo o modos con `none_llm`). LangGraph viene incluido en el paquete:
   ```bash
   pip install -e ".[telegram]" --no-build-isolation
   ```
@@ -193,7 +199,7 @@ En modo **langgraph** con cualquier proveedor LLM (openai, anthropic, ollama, ml
 
 ### Ejecución
 
-1. Ejecuta el wizard y elige modo **langgraph** y el proveedor deseado:
+1. Ejecuta el wizard y elige modo **langgraph** o **bicameral_langgraph** con el proveedor deseado:
    ```bash
    ./scripts/install_duckclaw.sh
    ```
