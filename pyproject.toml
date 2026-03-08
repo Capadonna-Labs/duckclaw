@@ -46,7 +46,13 @@ fabric = [
     "azure-storage-file-datalake>=12.14.0",
     "azure-identity>=1.15.0",
 ]
+
+ollama = [
+    "langchain-ollama>=0.2.0",
+]
+
 # all = telegram + dashboard + langgraph + openai (sin crewai: conflictos de deps con openai/langchain)
+
 all = [
     "python-telegram-bot>=21,<22",
     "streamlit>=1.28",

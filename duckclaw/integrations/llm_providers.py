@@ -270,7 +270,7 @@ def build_llm(
         if not url:
             raise RuntimeError("Proveedor Ollama requiere URL (ej. http://localhost:11434).")
         try:
-            from langchain_community.chat_models import ChatOllama
+            from langchain_ollama import ChatOllama
         except ImportError as e:
             raise RuntimeError(
                 "Para Ollama instala: pip install langchain-community"
