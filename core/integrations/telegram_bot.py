@@ -276,7 +276,29 @@ def run_bot(
     app.run_polling()
 
 
+def _load_dotenv() -> None:
+    """Load .env from project root if present (no hard dep on python-dotenv)."""
+    env_file = os.path.join(os.path.dirname(__file__), "..", "..", ".env")
+    env_path = os.path.normpath(env_file)
+    if not os.path.isfile(env_path):
+        return
+    try:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _load_dotenv()
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable.")

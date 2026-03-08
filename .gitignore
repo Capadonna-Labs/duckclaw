@@ -28,4 +28,9 @@ Makefile
 
 # Security testing artifacts
 strix_runs/
+
+# Environment secrets (never commit)
+.env
+.env.*
+!.env.example
 .security/

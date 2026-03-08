@@ -377,6 +377,7 @@ def _generate_ecosystem_config(repo_root: Path, state: dict[str, Any]) -> str:
     llm_model = state.get("llm_model", "")
     llm_base_url = state.get("llm_base_url", "")
     cwd = str(repo_root)
+    venv_python = str(repo_root / ".venv" / "bin" / "python3")
     env_lines = [
         f'    PYTHONPATH: "{cwd}",',
         f'    DUCKCLAW_DB_PATH: "{db_path}",',
@@ -391,15 +392,14 @@ def _generate_ecosystem_config(repo_root: Path, state: dict[str, Any]) -> str:
  * Start: pm2 start ecosystem.core.config.cjs
  * Stop:  pm2 stop {app_name}
  *
- * IMPORTANT: Export TELEGRAM_BOT_TOKEN before starting:
- *   export TELEGRAM_BOT_TOKEN="your_token"
- *   pm2 start ecosystem.core.config.cjs
+ * Token: guardado en .env (auto-cargado por el bot al iniciar).
+ * Para actualizar el token: edita .env o regenera este config desde el wizard.
  */
 module.exports = {{
   apps: [
     {{
       name: "{app_name}",
-      script: "python",
+      script: "{venv_python}",
       args: "-m core.integrations.telegram_bot",
       cwd: "{cwd}",
       interpreter: "none",
@@ -407,13 +407,49 @@ module.exports = {{
       watch: false,
       max_restarts: 10,
       env: {{
-        TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || "",
-{env_block}
+        PYTHONPATH: "{cwd}",
+        DUCKCLAW_DB_PATH: "{db_path}",
+        DUCKCLAW_BOT_MODE: "{bot_mode}",
+        DUCKCLAW_LLM_PROVIDER: "{llm_provider}",
+        DUCKCLAW_LLM_MODEL: "{llm_model}",
+        DUCKCLAW_LLM_BASE_URL: "{llm_base_url}",
       }},
     }},
   ],
 }};
 '''
+
+
+def _write_env_token(token: str, repo_root: Path) -> None:
+    """Write or update TELEGRAM_BOT_TOKEN in .env (project root). Never overwrites other keys."""
+    env_path = repo_root / ".env"
+    lines: list[str] = []
+    found = False
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("TELEGRAM_BOT_TOKEN="):
+                lines.append(f'TELEGRAM_BOT_TOKEN="{token}"')
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f'TELEGRAM_BOT_TOKEN="{token}"')
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _load_dotenv_value(repo_root: Path, key: str) -> str:
+    """Read a single value from .env without side effects."""
+    env_path = repo_root / ".env"
+    if not env_path.exists():
+        return ""
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k.strip() == key:
+            return v.strip().strip('"').strip("'")
+    return ""
 
 
 def _configure_pm2_settings(
@@ -466,6 +502,7 @@ def _configure_pm2_settings(
     # Only update if it looks like a real token (not a censored placeholder)
     if new_token and not new_token.endswith("…") and "***" not in new_token:
         state["token"] = new_token
+        _write_env_token(new_token, repo_root=Path(__file__).resolve().parent.parent)
 
     # LLM settings (solo si el modo lo requiere)
     if _uses_provider_section(state.get("bot_mode", "")):
@@ -832,12 +869,15 @@ def _run_section(
         return True, "", None
 
     if section_id == "token":
-        _print_section(console, "Token", "No se guarda en disco por seguridad.", "cyan")
+        _print_section(console, "Token", "Se guarda en .env (excluido de git).", "cyan")
+        env_dotenv = _load_dotenv_value(repo_root, "TELEGRAM_BOT_TOKEN")
         if os.environ.get("TELEGRAM_BOT_TOKEN", "").strip():
             state["token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
             console.print(f"[dim]Token tomado de TELEGRAM_BOT_TOKEN: {_censor_token(state['token'])}[/]")
+        elif env_dotenv:
+            state["token"] = env_dotenv
+            console.print(f"[dim]Token cargado desde .env: {_censor_token(env_dotenv)}[/]")
         else:
-            console.print("[dim]El token no se guarda por seguridad.[/]")
             val, nav = _prompt_with_nav(console, "TELEGRAM_BOT_TOKEN", password=True)
             if nav:
                 return True, "", nav
@@ -855,6 +895,8 @@ def _run_section(
             if not ok_api:
                 return False, f"Telegram rechazó el token: {err_api}", None
             _print_ok(console, "Token validado.")
+        # Persist token to .env for PM2 and future runs
+        _write_env_token(state["token"], repo_root)
         return True, "", None
 
     if section_id == "db_path":
