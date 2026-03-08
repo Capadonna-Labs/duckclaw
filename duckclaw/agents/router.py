@@ -252,6 +252,7 @@ def build_entry_router_graph(
         return out
 
     def retail_node(state: dict) -> dict:
+        assert retail_graph is not None
         result = retail_graph.invoke({
             "incoming": state.get("incoming", ""),
         })

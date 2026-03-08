@@ -1,0 +1,20 @@
+{"prompt": "¿Cuáles son los mejores vendedores?", "expected_tool": "get_top_sellers"}
+{"prompt": "¿Cuál es el tiempo medio de entrega?", "expected_tool": "get_delivery_metrics"}
+{"prompt": "¿Qué tablas hay disponibles?", "expected_tool": "list_tables"}
+{"prompt": "Dame un resumen de ventas", "expected_tool": "get_sales_summary"}
+{"prompt": "¿Cuál es la satisfacción de los clientes?", "expected_tool": "get_review_metrics"}
+{"prompt": "Ventas por categoría de producto", "expected_tool": "get_category_sales"}
+{"prompt": "¿Quiénes son los clientes que más compran?", "expected_tool": "get_top_customers_by_sales"}
+{"prompt": "Clientes a fidelizar con más de 2 pedidos", "expected_tool": "get_customers_to_retain"}
+{"prompt": "Entregas críticas de más de 20 días", "expected_tool": "get_delivery_critical_cases"}
+{"prompt": "Ventas por mes en 2017", "expected_tool": "get_sales_by_month"}
+{"prompt": "Gráfico de barras de mejores vendedores", "expected_tool": "plot_top_sellers_bar"}
+{"prompt": "Diagrama de torta con las top 5 categorías por venta", "expected_tool": "plot_category_sales_pie"}
+{"prompt": "Gráfico de barras de los clientes que más compran", "expected_tool": "plot_top_customers_bar"}
+{"prompt": "Histograma de días de entrega", "expected_tool": "plot_delivery_days_histogram"}
+{"prompt": "Gráfico de torta de valoraciones", "expected_tool": "plot_review_score_pie"}
+{"prompt": "Gráfico de líneas de ventas por mes en 2018", "expected_tool": "plot_sales_by_month_line"}
+{"prompt": "Describe las columnas de olist_orders", "expected_tool": "describe_table"}
+{"prompt": "¿Cuántas tablas hay en la base?", "expected_tool": "list_tables"}
+{"prompt": "Dame un resumen de ventas", "expected_tool": "get_sales_summary"}
+{"prompt": "Top 10 vendedores por ventas", "expected_tool": "get_top_sellers"}

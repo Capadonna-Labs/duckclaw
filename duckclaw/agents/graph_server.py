@@ -84,6 +84,27 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+async def _tailscale_auth_middleware(request: Request, call_next):
+    """Valida X-Tailscale-Auth-Key si DUCKCLAW_TAILSCALE_AUTH_KEY está definida."""
+    from starlette.responses import JSONResponse
+    auth_key = os.environ.get("DUCKCLAW_TAILSCALE_AUTH_KEY", "").strip()
+    if not auth_key:
+        return await call_next(request)
+    path = request.url.path.rstrip("/") or "/"
+    if path in ("/", "/health"):
+        return await call_next(request)
+    header_key = request.headers.get("X-Tailscale-Auth-Key", "").strip()
+    if header_key != auth_key:
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "X-Tailscale-Auth-Key inválida o faltante"},
+        )
+    return await call_next(request)
+
+
+app.middleware("http")(_tailscale_auth_middleware)
+
 # ── Estado global del grafo ────────────────────────────────────────────────────
 
 _graph_state: dict[str, Any] = {}
@@ -330,9 +351,13 @@ def _run_server(host: str = "0.0.0.0", port: int = 8123, reload: bool = False) -
 
 if __name__ == "__main__":
     import argparse
+    try:
+        default_port = int(os.environ.get("DUCKCLAW_API_PORT", "8123"))
+    except ValueError:
+        default_port = 8123
     parser = argparse.ArgumentParser(description="DuckClaw LangGraph API Server")
     parser.add_argument("--host",   default="0.0.0.0", help="Host (default: 0.0.0.0)")
-    parser.add_argument("--port",   default=8123, type=int, help="Puerto (default: 8123)")
+    parser.add_argument("--port",   default=default_port, type=int, help=f"Puerto (default: {default_port}, o DUCKCLAW_API_PORT)")
     parser.add_argument("--reload", action="store_true",    help="Reload automático en desarrollo")
     args = parser.parse_args()
     _run_server(host=args.host, port=args.port, reload=args.reload)

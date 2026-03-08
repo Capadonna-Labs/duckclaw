@@ -26,11 +26,26 @@ def load_schema_sql(spec: WorkerSpec) -> str:
     return ""
 
 
+def _ensure_agent_beliefs(db: Any, schema: str) -> None:
+    """Create agent_beliefs table for homeostasis (Active Inference Framework)."""
+    s = _safe_ident(schema)
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS {s}.agent_beliefs (
+            belief_key VARCHAR PRIMARY KEY,
+            target_value REAL NOT NULL,
+            observed_value REAL,
+            threshold REAL NOT NULL,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
 def run_schema(db: Any, spec: WorkerSpec) -> None:
     """Create isolated schema and run schema.sql."""
     schema = spec.schema_name
     # DuckDB: CREATE SCHEMA IF NOT EXISTS name;
     db.execute(f"CREATE SCHEMA IF NOT EXISTS {_safe_ident(schema)}")
+    _ensure_agent_beliefs(db, schema)
     sql = load_schema_sql(spec)
     if not sql:
         return

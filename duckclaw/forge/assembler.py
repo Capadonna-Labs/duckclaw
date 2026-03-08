@@ -16,7 +16,7 @@ from typing import Any, Optional
 try:
     import yaml
 except ImportError:
-    yaml = None
+    yaml = None  # type: ignore[assignment]
 
 
 class AgentAssembler:

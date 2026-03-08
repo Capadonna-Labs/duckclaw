@@ -70,7 +70,7 @@ class OpenAIAdapter(BaseAgent):
         client = OpenAI()
         db = self.db
         tools_spec = _openai_tools_spec()
-        messages = [{"role": "system", "content": self._system_prompt}]
+        messages: List[dict[str, Any]] = [{"role": "system", "content": self._system_prompt}]
         for h in (history or []):
             role = (h.get("role") or "user").lower()
             if role not in ("user", "assistant", "system"):

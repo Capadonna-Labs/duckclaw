@@ -59,20 +59,31 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
     skills_list = data.get("skills") or []
     if isinstance(skills_list, str):
         skills_list = [s.strip() for s in skills_list.split(",") if s.strip()]
-    # skills: strings (nombres) o dicts (ej. {github: {...}}, {research: {...}})
+    # skills: strings (nombres) o dicts (ej. {github: {...}}, {research: {...}}, {tailscale: {...}}, {sft: {...}})
     skills_names = [s for s in skills_list if isinstance(s, str)]
     github_config = None
     research_config = None
+    tailscale_config = None
+    sft_config = None
     for s in skills_list:
         if isinstance(s, dict):
             if "github" in s and github_config is None:
                 github_config = s["github"] if isinstance(s.get("github"), dict) else {}
             if "research" in s and research_config is None:
                 research_config = s["research"] if isinstance(s.get("research"), dict) else {}
+            if "tailscale" in s and tailscale_config is None:
+                tailscale_config = s["tailscale"] if isinstance(s.get("tailscale"), dict) else {}
+            if "sft" in s and sft_config is None:
+                sft_config = s["sft"] if isinstance(s.get("sft"), dict) else {}
     if github_config is None and isinstance(data.get("github"), dict):
         github_config = data["github"]
     if research_config is None and isinstance(data.get("research"), dict):
         research_config = data["research"]
+    if tailscale_config is None and isinstance(data.get("tailscale"), dict):
+        tailscale_config = data["tailscale"]
+    if sft_config is None and isinstance(data.get("sft"), dict):
+        sft_config = data["sft"]
+    homeostasis_config = _load_homeostasis_config(worker_dir, data)
     allowed_tables = data.get("allowed_tables") or []
     if isinstance(allowed_tables, str):
         allowed_tables = [t.strip() for t in allowed_tables.split(",") if t.strip()]
@@ -91,7 +102,29 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         worker_dir=worker_dir,
         github_config=github_config,
         research_config=research_config,
+        tailscale_config=tailscale_config,
+        sft_config=sft_config,
+        homeostasis_config=homeostasis_config,
     )
+
+
+def _load_homeostasis_config(worker_dir: Path, manifest_data: dict) -> Optional[dict]:
+    """Load homeostasis config from homeostasis.yaml or manifest homeostasis key."""
+    # 1. Try homeostasis.yaml in worker dir
+    yaml_path = worker_dir / "homeostasis.yaml"
+    if yaml_path.is_file():
+        try:
+            import yaml
+            data = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+            if isinstance(data, dict):
+                return data.get("homeostasis") or data
+        except Exception:
+            pass
+    # 2. Fallback to manifest homeostasis key
+    h = manifest_data.get("homeostasis")
+    if isinstance(h, dict):
+        return h
+    return None
 
 
 def _default_schema(worker_id: str) -> str:
@@ -126,7 +159,8 @@ class WorkerSpec:
     __slots__ = (
         "worker_id", "name", "schema_name", "llm_required", "temperature",
         "topology", "skills_list", "allowed_tables", "read_only", "worker_dir",
-        "github_config", "research_config",
+        "github_config", "research_config", "tailscale_config", "sft_config",
+        "homeostasis_config",
     )
 
     def __init__(
@@ -143,6 +177,9 @@ class WorkerSpec:
         worker_dir: Path,
         github_config: Optional[dict] = None,
         research_config: Optional[dict] = None,
+        tailscale_config: Optional[dict] = None,
+        sft_config: Optional[dict] = None,
+        homeostasis_config: Optional[dict] = None,
     ):
         self.worker_id = worker_id
         self.name = name
@@ -156,3 +193,6 @@ class WorkerSpec:
         self.worker_dir = worker_dir
         self.github_config = github_config
         self.research_config = research_config
+        self.tailscale_config = tailscale_config
+        self.sft_config = sft_config
+        self.homeostasis_config = homeostasis_config

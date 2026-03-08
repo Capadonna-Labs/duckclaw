@@ -111,6 +111,22 @@ def build_general_graph(
         except Exception:
             pass
 
+    # Tailscale Mesh — opcional vía tools_spec
+    if "tailscale_status" in tool_names_set:
+        try:
+            from duckclaw.forge.skills.tailscale_bridge import register_tailscale_skill
+            register_tailscale_skill(tools, {"tailscale_enabled": True})
+        except Exception:
+            pass
+
+    # SFT pipeline — opcional vía tools_spec
+    if "collect_sft_dataset" in tool_names_set:
+        try:
+            from duckclaw.forge.skills.sft_bridge import register_sft_skill
+            register_sft_skill(tools, {"sft_enabled": True})
+        except Exception:
+            pass
+
     llm_with_tools = llm.bind_tools(tools)
     llm_with_required_tool = llm.bind_tools(tools, tool_choice="required")
     tools_by_name = {t.name: t for t in tools}

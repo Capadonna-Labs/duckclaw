@@ -16,5 +16,7 @@ tools:
   - run_sandbox   # se omite automáticamente si Docker no está disponible
   # - tavily_search   # requiere TAVILY_API_KEY y uv sync --extra tavily
   # - browser_navigate  # requiere uv sync --extra browser (Phase 2: Strix)
+  # - tailscale_status  # requiere tailscale instalado (spec: Tailscale Mesh)
+  # - collect_sft_dataset  # genera dataset SFT desde trazas (spec: SFT con MLX)
 llm:
   temperature: 0.2

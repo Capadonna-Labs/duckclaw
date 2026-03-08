@@ -1,0 +1,7 @@
+# Config para SFT pipeline (usado por scripts y skill)
+# Spec: specs/Migracion_de_Pipeline_de_Entrenamiento_(GRPO_a_SFT_con_MLX).md
+type: sft_pipeline
+input_path: train/grpo_olist_rewarded.jsonl
+output_path: train/dataset_sft.jsonl
+system_prompt: "Eres un asistente financiero experto."
+min_reward: 1.0

@@ -215,6 +215,45 @@ Then open [smith.langchain.com/studio](https://smith.langchain.com/studio) and c
 
 ---
 
+## Tailscale Mesh (Red Distribuida)
+
+DuckClaw soporta una arquitectura de red privada entre Mac Mini (agentes + MLX) y VPS (n8n, PostgreSQL) usando **Tailscale** (WireGuard). El tráfico permanece cifrado E2EE dentro del túnel, cumpliendo Habeas Data.
+
+### Instalación
+
+**Mac Mini / local:**
+```bash
+./scripts/tailscale_setup.sh
+```
+
+**VPS (vía SSH):**
+```bash
+ssh user@vps 'bash -s' < scripts/tailscale_install_vps.sh
+```
+
+### Configuración
+
+1. **ACLs** en [Tailscale Admin Console](https://login.tailscale.com/admin/acls): define `tag:vps` y `tag:mac-mini` para Privilegio Mínimo.
+2. **Autenticación API:** añade a `.env`:
+   ```env
+   DUCKCLAW_TAILSCALE_AUTH_KEY=tu_clave_secreta
+   ```
+   Las peticiones a `/invoke`, `/stream`, etc. deben incluir `X-Tailscale-Auth-Key: tu_clave_secreta`. `/` y `/health` no requieren auth.
+3. **Puerto:** para usar 8000 (según spec): `DUCKCLAW_API_PORT=8000 duckops serve --port 8000`
+
+### Skill tailscale_status
+
+Habilita el tool en el grafo general añadiendo `tailscale_status` a `tools` en el YAML, o en workers con `skills: [{ tailscale: { tailscale_enabled: true } }]`. El tool verifica `ConnectionStatus: Active|Down` y lista peers.
+
+### Verificación
+
+Desde el VPS hacia la Mac Mini:
+```bash
+curl http://<MAC_TAILSCALE_IP>:8123/health
+```
+
+---
+
 ## LangSmith Tracing
 
 Add these to your `.env` to send all LangGraph runs to LangSmith:
@@ -255,6 +294,10 @@ MLX_PORT=8080
 LANGCHAIN_TRACING_V2=true
 LANGCHAIN_API_KEY=lsv2_pt_...
 LANGCHAIN_PROJECT=Finanz
+
+# Tailscale Mesh (opcional)
+DUCKCLAW_TAILSCALE_AUTH_KEY=...   # Valida X-Tailscale-Auth-Key en /invoke, /stream
+DUCKCLAW_API_PORT=8123            # Puerto del API (default 8123; usar 8000 para spec Tailscale)
 ```
 
 > `.env` is git-ignored. Never commit tokens or API keys.

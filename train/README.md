@@ -1,8 +1,75 @@
-# Trazas para entrenamiento GRPO
+# Trazas para entrenamiento (SFT por defecto, GRPO alternativa)
 
-Este directorio almacena trazas en formato JSONL listas para **GRPO** (Group Relative Policy Optimization).
+Este directorio almacena trazas en formato JSONL. El **pipeline por defecto** es **SFT** (Supervised Fine-Tuning) con MLX. GRPO (Group Relative Policy Optimization) sigue disponible como alternativa.
 
-## Formato
+## Pipeline SFT (por defecto)
+
+### 1. Guardar trazas
+
+```python
+from duckclaw.bi import ask_bi, load_olist_data
+import duckclaw
+
+db = duckclaw.DuckClaw("olist_bi.duckdb")
+load_olist_data(db, "data")
+respuesta = ask_bi(db, "¿Mejores vendedores?", provider="groq", save_traces=True)
+```
+
+### 2. Clasificar rewards y generar dataset SFT
+
+```python
+from duckclaw.rl import classify_traces
+from duckclaw.forge.sft import collect_traces_to_sft
+
+# Clasificar trazas (escribe grpo_olist_rewarded.jsonl)
+classify_traces()
+
+# Generar dataset SFT (dataset_sft.jsonl) — solo trazas con reward 1.0
+records, stats = collect_traces_to_sft()
+print("SFT:", stats)  # total_output, skipped_sql, skipped_reward
+```
+
+### 3. Entrenar con MLX
+
+```bash
+# Requiere: pip install "mlx-lm[train]"
+python mlx/train_sft.py
+```
+
+Salida: `train/adapters/` (LoRA).
+
+### 4. Model-Guard y Hot-Swap
+
+Antes del hot-swap, `mlx_hotswap.sh` ejecuta **Model-Guard** (`scripts/eval_model.py`): evalúa el modelo contra `golden_dataset.jsonl` (Accuracy: SQL válido). Si accuracy >= 95%, procede con el hot-swap; si no, aborta y alerta por Telegram.
+
+```bash
+./scripts/mlx_hotswap.sh
+```
+
+Evaluación manual (con DuckDB para LogicScore):
+
+```bash
+python scripts/eval_model.py --model train/model_finetuned --db-path olist.duckdb
+```
+
+---
+
+## Pipeline GRPO (alternativa)
+
+Para entrenamiento GRPO con Unsloth u otros frameworks que requieren múltiples completions por prompt:
+
+```python
+from duckclaw.rl import classify_traces, convert_to_grpo_groups
+
+classify_traces()
+groups, stats = convert_to_grpo_groups()
+```
+
+Salida: `train/grpo_olist_groups.jsonl` (solo prompts con ≥2 completions).
+
+---
+
+## Formato de trazas
 
 Cada línea es un objeto JSON:
 
@@ -23,91 +90,39 @@ Cada línea es un objeto JSON:
 - **messages**: formato chat para entrenamiento.
 - **metadata**: timestamp, provider (groq/mlx), source.
 
-## Uso
-
-### Guardar trazas desde ask_bi
-
-```python
-from duckclaw.bi import ask_bi, load_olist_data
-import duckclaw
-
-db = duckclaw.DuckClaw("olist_bi.duckdb")
-load_olist_data(db, "data")
-
-respuesta = ask_bi(db, "¿Mejores vendedores?", provider="groq", save_traces=True)
-
-# Enviar también a LangSmith (requiere LANGCHAIN_API_KEY)
-respuesta = ask_bi(db, "¿Mejores vendedores?", provider="groq", save_traces=True, send_to_langsmith=True)
-```
-
-### API directa
+## API directa
 
 ```python
 from duckclaw.bi.grpo_traces import save_grpo_trace, load_grpo_traces, trace_stats
 
 save_grpo_trace("¿Cuál es el tiempo de entrega?", "<thought>...</thought>...", provider="mlx")
-save_grpo_trace("...", "...", provider="groq", send_to_langsmith=True)  # También a LangSmith
-traces = load_grpo_traces(limit=100)  # Por defecto carga grpo_olist_rewarded.jsonl (con rewards)
-print(trace_stats())  # Stats del archivo rewarded por defecto
+traces = load_grpo_traces(limit=100)  # Por defecto carga grpo_olist_rewarded.jsonl
+print(trace_stats())
 ```
 
-### LangSmith
+## LangSmith
 
 Para enviar trazas a [LangSmith](https://smith.langchain.com/):
 
-1. Crea `.env` en la raíz del repo con:
-   - `LANGCHAIN_API_KEY=lsv2_pt_...` (o `LANGSMITH_API_KEY`)
-   - `LANGCHAIN_PROJECT=Olist` (debe coincidir con el proyecto en smith.langchain.com)
-2. `save_traces=True, send_to_langsmith=True` en `ask_bi` o `save_grpo_trace(..., send_to_langsmith=True)`
-3. El módulo carga `.env` automáticamente y usa `tracing_context(enabled=True)` para forzar el envío
+1. Crea `.env` con `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`
+2. `save_traces=True, send_to_langsmith=True` en `ask_bi` o `save_grpo_trace`
 
-## Clasificación de recompensas (GRPO)
-
-Para clasificar rewards y generar el dataset listo para entrenar:
-
-```python
-from duckclaw.rl import classify_traces, load_rewarded_traces, compute_reward
-
-# Clasificar todas las trazas y escribir train/grpo_olist_rewarded.jsonl
-rewarded, stats = classify_traces()
-print("Stats:", stats)
-
-# Cargar trazas clasificadas (con reward)
-traces = load_rewarded_traces(min_reward=0.3)
-```
-
-Criterios de reward:
+## Criterios de reward (clasificación)
 
 - Formato: `<thought>`, `<tool_call>`, `<answer>` en orden (+0.25)
 - JSON válido en tool_call (+0.25)
 - Tools válidas (+0.25)
 - Sin artefactos `<|eot_id|>` (+0.1)
 - Coherencia prompt→herramienta (+0.15)
-- Penalización por incoherencia o exceso de tools
-
-## Formato GRPO para Unsloth (grupos)
-
-GRPO requiere **múltiples completions por prompt** para calcular ventajas. Si solo hay una respuesta por prompt, el gradiente se anula (Training Loss 0.0).
-
-Convierte `grpo_olist_rewarded.jsonl` al formato de grupos:
-
-```python
-from duckclaw.rl import convert_to_grpo_groups
-
-groups, stats = convert_to_grpo_groups()
-print("Stats:", stats)  # groups_output, groups_skipped, etc.
-```
-
-Salida en `train/grpo_olist_groups.jsonl`:
-
-```json
-{"prompt": "¿Cuántas tablas hay?", "completions":[{"text": "<thought>...</thought>...", "reward": 1.0}, {"text": "...", "reward": -0.2}]}
-```
-
-Solo se incluyen prompts con ≥2 completions (configurable con `min_completions_per_prompt`). Para tener grupos, repite preguntas con distintos modelos o temperaturas. Si tienes `rewarded.jsonl` en formato flat antiguo, ejecuta `migrate_rewarded_to_groups_format()`.
 
 ## Archivos
 
-- `grpo_olist_traces.jsonl`: trazas crudas (append). Entrada de `classify_traces()`.
-- `grpo_olist_rewarded.jsonl`: **formato grupos** `{"prompt": "...", "completions": [{"text": "...", "reward": 1.0}]}`. Nuevas trazas se fusionan por prompt. `save_grpo_trace` y `classify_traces` escriben en este formato.
-- `grpo_olist_groups.jsonl`: filtrado para Unsloth (solo prompts con ≥2 completions). **Usar para entrenar.**
+| Archivo | Descripción |
+|---------|-------------|
+| `grpo_olist_traces.jsonl` | Trazas crudas. Entrada de `classify_traces()`. |
+| `grpo_olist_rewarded.jsonl` | Formato grupos con rewards. Entrada de `collect_traces_to_sft()` y `convert_to_grpo_groups()`. |
+| **`dataset_sft.jsonl`** | **Dataset de entrenamiento SFT por defecto.** Formato ChatML. Salida de `collect_traces_to_sft()`. |
+| `grpo_olist_groups.jsonl` | Alternativa GRPO: solo prompts con ≥2 completions. Para Unsloth. |
+| `adapters/` | Pesos LoRA tras `mlx/train_sft.py`. |
+| `model_finetuned/` | Modelo fusionado tras `scripts/mlx_hotswap.sh`. |
+| **`golden_dataset.jsonl`** | **Golden dataset para Model-Guard.** 10-20 consultas sintéticas validadas. |

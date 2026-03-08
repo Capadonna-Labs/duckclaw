@@ -49,6 +49,7 @@ def main(args: list[str] | None = None) -> int:
     serve_parser.add_argument("--pm2",    action="store_true", help="Deploy as PM2 service instead of running directly")
     serve_parser.add_argument("--name",   default="DuckClaw-API", help="PM2 service name (default: DuckClaw-API)")
     serve_parser.add_argument("--cwd",    default=None, help="Working directory (default: current)")
+    serve_parser.add_argument("--gateway", action="store_true", help="Use API Gateway (duckclaw.api.gateway) instead of graph_server")
 
     hire_parser = subparsers.add_parser("hire", help="Deploy a Virtual Worker from template (Plug & Play)")
     hire_parser.add_argument("worker_id", nargs="?", default="", help="Template id (e.g. personal_finance, support)")
@@ -89,6 +90,7 @@ def main(args: list[str] | None = None) -> int:
             pm2=parsed.pm2,
             name=parsed.name,
             cwd=parsed.cwd,
+            gateway=getattr(parsed, "gateway", False),
         )
 
     if parsed.subcommand == "hire":

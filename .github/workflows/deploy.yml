@@ -1,0 +1,120 @@
+# Pipeline CI/CD para arquitectura distribuida
+# Spec: specs/Pipeline_de_Despliegue_Continuo_(CI_CD)_para_Arquitectura_Distribuida.md
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --extra agents --extra dev
+
+      - name: Run pytest
+        run: uv run pytest tests/ -v
+
+      - name: Run mypy
+        run: uv run mypy duckclaw/
+
+      - name: Validate SQL
+        run: uv run python scripts/validate_sql.py
+
+  deploy-mac:
+    needs: test
+    runs-on: [self-hosted, mac-mini]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pull latest
+        run: git pull origin main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Install dependencies
+        run: uv sync --extra agents
+
+      - name: Reload PM2
+        run: pm2 reload ecosystem.core.config.cjs
+
+      - name: Health check
+        id: health
+        run: |
+          sleep 5
+          curl -sf http://localhost:8123/health || curl -sf http://localhost:8080/health || exit 1
+        continue-on-error: true
+
+      - name: Rollback on failure
+        if: steps.health.outcome == 'failure'
+        run: |
+          git checkout HEAD~1
+          uv sync --extra agents
+          pm2 reload ecosystem.core.config.cjs
+          exit 1
+
+  deploy-vps:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.VPS_IP }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          envs: VPS_DEPLOY_PATH
+          script: |
+            cd "${VPS_DEPLOY_PATH:-/opt/duckclaw-vps}"
+            git pull origin main
+            docker compose pull && docker compose up -d
+            if systemctl is-active --quiet n8n 2>/dev/null; then
+              sudo systemctl restart n8n
+            fi
+
+  notify:
+    needs: [deploy-mac, deploy-vps]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Send Telegram notification
+        env:
+          NEEDS_DEPLOY_MAC: ${{ needs.deploy-mac.result }}
+          NEEDS_DEPLOY_VPS: ${{ needs.deploy-vps.result }}
+        run: |
+          COMMIT_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          MAC="${NEEDS_DEPLOY_MAC:-skipped}"
+          VPS="${NEEDS_DEPLOY_VPS:-skipped}"
+          if [ "$MAC" = "success" ] && [ "$VPS" = "success" ]; then
+            MSG="✅ Deploy OK — commit $COMMIT_SHORT"
+          else
+            MSG="❌ Deploy falló — commit $COMMIT_SHORT (mac=$MAC vps=$VPS)"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
+            -d "text=$MSG" || true

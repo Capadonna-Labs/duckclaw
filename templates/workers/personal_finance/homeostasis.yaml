@@ -1,0 +1,17 @@
+# FinanzWorker — homeostasis (Active Inference Framework)
+# Spec: specs/Estandar_de_Agentes_Homeostaticos_(Active_Inference_Framework).md
+homeostasis:
+  beliefs:
+    - key: "presupuesto_mensual"
+      target: 5000.0
+      threshold: 500.0
+    - key: "tasa_ahorro_objetivo"
+      target: 0.20
+      threshold: 0.05
+  actions:
+    - trigger: "presupuesto_mensual_breach"
+      skill: "get_monthly_summary"
+      message: "El presupuesto mensual se ha desviado. Revisando resumen."
+    - trigger: "tasa_ahorro_objetivo_drop"
+      skill: "get_monthly_summary"
+      message: "La tasa de ahorro está por debajo del objetivo. Revisando resumen."

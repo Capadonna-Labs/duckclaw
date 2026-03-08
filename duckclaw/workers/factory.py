@@ -157,6 +157,30 @@ def build_worker_graph(
         except Exception:
             pass
 
+    if getattr(spec, "tailscale_config", None):
+        try:
+            from duckclaw.forge.skills.tailscale_bridge import register_tailscale_skill
+            register_tailscale_skill(tools, spec.tailscale_config)
+            tools_by_name = {t.name: t for t in tools}
+        except Exception:
+            pass
+
+    if getattr(spec, "sft_config", None):
+        try:
+            from duckclaw.forge.skills.sft_bridge import register_sft_skill
+            register_sft_skill(tools, spec.sft_config)
+            tools_by_name = {t.name: t for t in tools}
+        except Exception:
+            pass
+
+    if getattr(spec, "homeostasis_config", None):
+        try:
+            from duckclaw.forge.skills.homeostasis_bridge import register_homeostasis_skill
+            register_homeostasis_skill(tools, spec, db, tools_by_name)
+            tools_by_name = {t.name: t for t in tools}
+        except Exception:
+            pass
+
     from langgraph.graph import END, StateGraph
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
@@ -227,12 +251,21 @@ def build_worker_graph(
         last = state["messages"][-1]
         return "tools" if getattr(last, "tool_calls", None) else "end"
 
+    def homeostasis_node(state: dict) -> dict:
+        """HomeostasisNode: Percepción-Sorpresa-Restauración-Actualización. Fase 1: pass-through (tabla ya creada en run_schema)."""
+        return {}
+
     graph = StateGraph(dict)
     graph.add_node("prepare", prepare_node)
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
     graph.add_node("set_reply", set_reply)
-    graph.set_entry_point("prepare")
+    if getattr(spec, "homeostasis_config", None):
+        graph.add_node("homeostasis", homeostasis_node)
+        graph.set_entry_point("homeostasis")
+        graph.add_edge("homeostasis", "prepare")
+    else:
+        graph.set_entry_point("prepare")
     graph.add_edge("prepare", "agent")
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": "set_reply"})
     graph.add_edge("tools", "agent")

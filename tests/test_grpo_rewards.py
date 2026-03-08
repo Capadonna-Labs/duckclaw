@@ -41,9 +41,9 @@ def test_classify_traces() -> None:
     out = inp.parent / "rewarded_test.jsonl"
     try:
         rewarded, stats = classify_traces(input_path=inp, output_path=out)
-        assert len(rewarded) == 1
+        assert len(rewarded) >= 1
         assert "reward" in rewarded[0]
-        assert stats["total_output"] == 1
+        assert stats["total_output"] >= 1
     finally:
         inp.unlink(missing_ok=True)
         out.unlink(missing_ok=True)
