@@ -485,6 +485,20 @@ def _configure_pm2_settings(
         new_url = Prompt.ask("URL base LLM (opcional)", default=current_url or "").strip()
         state["llm_base_url"] = new_url
 
+    # ── Resumen tras editar ──────────────────────────────────────────────────
+    app_name_final = os.environ.get("DUCKCLAW_PM2_APP_NAME", PM2_APP_NAME_DEFAULT)
+    summary = Table(title="Resumen del servicio de persistencia", border_style="green")
+    summary.add_column("Parámetro", style="bold green")
+    summary.add_column("Valor", style="white")
+    summary.add_row("App PM2", app_name_final)
+    summary.add_row("Modo bot", state.get("bot_mode", "langgraph"))
+    summary.add_row("DB path", _normalize_db_path(state.get("db_path", "db/telegram.duckdb")))
+    summary.add_row("Token", _censor_token(state.get("token", "")) or "[dim](usa TELEGRAM_BOT_TOKEN)[/]")
+    if _uses_provider_section(state.get("bot_mode", "")):
+        summary.add_row("Proveedor LLM", state.get("llm_provider") or "none_llm")
+        summary.add_row("Modelo LLM", state.get("llm_model") or "-")
+        summary.add_row("URL base LLM", state.get("llm_base_url") or "-")
+    console.print(summary)
     _print_ok(console, "Configuración actualizada.")
 
 
