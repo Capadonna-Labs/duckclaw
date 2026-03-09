@@ -128,12 +128,13 @@ class ChatRequest(BaseModel):
     message: str = Field(..., description="Mensaje del usuario")
     session_id: str = Field("default", description="ID de sesión para historial")
     history: list[dict] = Field(default_factory=list, description="Historial opcional [{role, content}]")
+    stream: bool = Field(True, description="Si es True, retorna SSE. Si es False, retorna JSON.")
 
 
-@router.post("/{worker_id}/chat", summary="Chat con agente (streaming SSE)")
+@router.post("/{worker_id}/chat", summary="Chat con agente (streaming SSE o JSON)")
 async def chat_with_agent(worker_id: str, payload: ChatRequest):
     """
-    Envía un mensaje al agente. Retorna StreamingResponse (SSE) token por token.
+    Envía un mensaje al agente. Retorna StreamingResponse (SSE) token por token o JSON.
     Persiste en api_conversation para historial.
     """
     try:
@@ -146,6 +147,16 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
     db = _get_db()
     session_id = payload.session_id or "default"
     history = payload.history or _get_history(db, session_id, worker_id, limit=6)
+
+    if not payload.stream:
+        # Modo JSON directo para n8n / webhooks
+        try:
+            reply = await _ainvoke(graph, payload.message, history, session_id)
+            _persist_turn(db, session_id, worker_id, "user", payload.message)
+            _persist_turn(db, session_id, worker_id, "assistant", reply)
+            return {"response": reply, "session_id": session_id}
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
