@@ -24,7 +24,7 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
-        run: uv sync --extra agents --extra dev
+        run: uv sync --extra agents --extra dev --extra serve
 
       - name: Run pytest
         run: uv run pytest tests/ -v
