@@ -79,7 +79,12 @@ async def _ainvoke(graph: Any, message: str, history: list, chat_id: str) -> str
     state = {"incoming": message, "history": history or [], "chat_id": chat_id}
     loop = asyncio.get_event_loop()
     
-    config = {"configurable": {"thread_id": chat_id}}
+    config = {
+        "configurable": {"thread_id": chat_id},
+        "metadata": {"session_id": chat_id, "thread_id": chat_id},
+        "run_name": f"Chat_{chat_id}"
+    }
+    
     send_to_langsmith = os.environ.get("DUCKCLAW_SEND_TO_LANGSMITH", "false").lower() == "true"
     if send_to_langsmith:
         try:
