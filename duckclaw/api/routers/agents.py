@@ -151,6 +151,12 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
     if not payload.stream:
         # Modo JSON directo para n8n / webhooks
         try:
+            # Procesar comandos on-the-fly primero
+            from duckclaw.agents.on_the_fly_commands import handle_command
+            cmd_reply = handle_command(db, session_id, payload.message)
+            if cmd_reply:
+                return {"response": cmd_reply, "session_id": session_id}
+
             reply = await _ainvoke(graph, payload.message, history, session_id)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
@@ -160,6 +166,16 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
+            # Procesar comandos on-the-fly primero
+            from duckclaw.agents.on_the_fly_commands import handle_command
+            cmd_reply = handle_command(db, session_id, payload.message)
+            if cmd_reply:
+                for word in cmd_reply.split(" "):
+                    yield f"data: {word} \n\n"
+                    await asyncio.sleep(0.02)
+                yield "data: [DONE]\n\n"
+                return
+
             reply = await _ainvoke(graph, payload.message, history, session_id)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
