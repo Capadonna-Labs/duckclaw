@@ -84,9 +84,9 @@ async def _ainvoke(graph: Any, message: str, history: list, chat_id: str) -> str
     if send_to_langsmith:
         try:
             from langchain_core.tracers import LangChainTracer
-            # Try to get project name from graph spec
+            # Try to get project name from env, then graph spec
             spec = getattr(graph, "_worker_spec", None)
-            project_name = getattr(spec, "name", "DuckClaw") if spec else "DuckClaw"
+            project_name = os.environ.get("LANGCHAIN_PROJECT") or (getattr(spec, "name", "DuckClaw") if spec else "DuckClaw")
             config["callbacks"] = [LangChainTracer(project_name=project_name)]
         except Exception:
             pass
