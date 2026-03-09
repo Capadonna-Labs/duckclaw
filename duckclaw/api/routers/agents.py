@@ -92,7 +92,7 @@ async def _ainvoke(graph: Any, message: str, history: list, chat_id: str, metada
     config = {
         "configurable": {"thread_id": chat_id},
         "metadata": full_metadata,
-        "run_name": run_name_prefix
+        "run_name": "DuckClaw"
     }
     
     send_to_langsmith = os.environ.get("DUCKCLAW_SEND_TO_LANGSMITH", "false").lower() == "true"
