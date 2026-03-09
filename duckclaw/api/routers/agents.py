@@ -57,10 +57,18 @@ def _get_or_build_worker_graph(worker_id: str) -> Any:
         raise HTTPException(status_code=404, detail=f"Worker '{worker_id}' no encontrado")
     db_path = _get_db_path()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    provider = os.environ.get("DUCKCLAW_LLM_PROVIDER", "").strip()
+    model = os.environ.get("DUCKCLAW_LLM_MODEL", "").strip()
+    base_url = os.environ.get("DUCKCLAW_LLM_BASE_URL", "").strip()
+
     graph = AgentAssembler.from_yaml(manifest_path).build(
         db=None,
         llm=None,
         db_path=db_path,
+        llm_provider=provider if provider else None,
+        llm_model=model if model else None,
+        llm_base_url=base_url if base_url else None,
     )
     _graph_cache[worker_id] = graph
     return graph
