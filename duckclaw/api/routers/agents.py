@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
@@ -118,6 +119,21 @@ def _safe_sql(s: str) -> str:
     return (s or "").replace("'", "''")[:256]
 
 
+def _sanitize_for_telegram(text: str) -> str:
+    """Quita Markdown que Telegram no interpreta bien: ## ### #### y líneas ---."""
+    if not text or not isinstance(text, str):
+        return text
+    lines = text.split("\n")
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped in ("---", "***", "___"):
+            continue
+        cleaned = re.sub(r"^#+\s*", "", line.lstrip())
+        out.append(cleaned)
+    return "\n".join(out).strip()
+
+
 def _persist_turn(db: Any, session_id: str, worker_id: str, role: str, content: str) -> None:
     """Guarda un turno en api_conversation."""
     _ensure_api_conversation_table(db)
@@ -189,6 +205,7 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
 
             extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
             reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
+            reply = _sanitize_for_telegram(reply)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
             return {"response": reply, "session_id": session_id}
@@ -209,6 +226,7 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
 
             extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
             reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
+            reply = _sanitize_for_telegram(reply)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
             for word in reply.split(" "):
