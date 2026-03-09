@@ -32,7 +32,7 @@ def _get_db() -> Any:
 
 def _workers_with_homeostasis() -> list[tuple[str, str, dict]]:
     """Lista (worker_id, schema_name, homeostasis_config) de workers con homeostasis."""
-    result = []
+    result: list[tuple[str, str, dict]] = []
     if not _WORKERS_DIR.is_dir():
         return result
     for d in _WORKERS_DIR.iterdir():
