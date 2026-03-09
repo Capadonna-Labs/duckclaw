@@ -201,6 +201,16 @@ def build_worker_graph(
         except Exception:
             pass
 
+    # Aplicar LangSmith config al grafo final (no solo al llm) si está habilitado
+    send_to_langsmith = os.environ.get("DUCKCLAW_SEND_TO_LANGSMITH", "false").lower() == "true"
+    if send_to_langsmith:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_PROJECT"] = instance_name or getattr(spec, "name", "DuckClaw") or "default"
+        # Si la API KEY no existe en el entorno, LangSmith simplemente la ignorará o fallará silenciosamente
+    else:
+        # Desactivar explícitamente para esta instanciación si estaba globalmente activo
+        os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
     from langgraph.graph import END, StateGraph
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
