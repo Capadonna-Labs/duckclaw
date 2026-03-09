@@ -3,23 +3,24 @@
 from __future__ import annotations
 
 import getpass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 
-def deploy_systemd(
+def get_systemd_unit_content(
     name: str,
     command: str,
     python_path: str,
     cwd: str,
     **kwargs: Any,
-) -> str:
-    # Generate unit file content. We use ExecStart with the current Python and the user's command.
-    # command might be "-m duckclaw.agents.telegram_bot" or a path; run as: python_path + " " + command
+) -> Tuple[str, str]:
+    """
+    Generate only the .service file content (no instructions).
+    Returns (content, unit_filename) e.g. ("[Unit]...", "DuckClaw-Brain.service").
+    """
     exec_start = f"{python_path} {command}" if command.strip().startswith("-") else f"{python_path} {command}"
     safe_name = name.replace(" ", "-").replace(".", "-")
     unit_name = f"{safe_name}.service"
     user = getpass.getuser()
-
     content = f"""[Unit]
 Description=DuckClaw service: {name}
 After=network.target
@@ -35,7 +36,18 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 """
+    return content.strip(), unit_name
 
+
+def deploy_systemd(
+    name: str,
+    command: str,
+    python_path: str,
+    cwd: str,
+    **kwargs: Any,
+) -> str:
+    content, unit_name = get_systemd_unit_content(name, command=command, python_path=python_path, cwd=cwd, **kwargs)
+    safe_name = name.replace(" ", "-").replace(".", "-")
     warning = (
         "You need sudo to install the unit file. Example:\n"
         f"  sudo cp /path/to/{unit_name} /etc/systemd/system/\n"
@@ -46,6 +58,6 @@ WantedBy=multi-user.target
         f"Generated systemd unit content for '{name}'.\n"
         f"Save it to a file (e.g. {unit_name}) and then:\n{warning}\n"
         "--- Content ---\n"
-        f"{content.strip()}\n"
+        f"{content}\n"
         "--- End ---"
     )

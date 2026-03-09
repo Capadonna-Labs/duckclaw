@@ -139,9 +139,29 @@ def build_worker_graph(
             pass
     tools_by_name = {t.name: t for t in tools}
 
-    provider = (llm_provider or os.environ.get("DUCKCLAW_LLM_PROVIDER") or "none_llm").strip().lower()
-    model = (llm_model or os.environ.get("DUCKCLAW_LLM_MODEL") or "").strip()
-    base_url = (llm_base_url or os.environ.get("DUCKCLAW_LLM_BASE_URL") or "").strip()
+    # Inferencia Elástica (Hardware-Aware): si el manifest tiene inference y no se pasó provider/model/base_url explícito, detectar hardware
+    inference_config = getattr(spec, "inference_config", None)
+    if inference_config is not None and not llm_provider and not llm_model and not llm_base_url:
+        try:
+            from duckclaw.integrations.hardware_detector import (
+                get_inference_config,
+                resolve_llm_params_from_config,
+            )
+            config = get_inference_config(inference_config)
+            provider, model, base_url = resolve_llm_params_from_config(config)
+            provider = (provider or "none_llm").strip().lower()
+            model = (model or "").strip()
+            base_url = (base_url or "").strip()
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Hardware detection failed or fallback disabled: %s", e)
+            provider = "none_llm"
+            model = ""
+            base_url = ""
+    else:
+        provider = (llm_provider or os.environ.get("DUCKCLAW_LLM_PROVIDER") or "none_llm").strip().lower()
+        model = (llm_model or os.environ.get("DUCKCLAW_LLM_MODEL") or "").strip()
+        base_url = (llm_base_url or os.environ.get("DUCKCLAW_LLM_BASE_URL") or "").strip()
 
     if llm is None and provider != "none_llm":
         from duckclaw.integrations.llm_providers import build_llm

@@ -9,6 +9,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.venv/
+venv/
+env/
 
 # Packaging/build directories
 build/
@@ -40,6 +43,7 @@ strix_runs/
 ecosystem.config.cjs
 ecosystem.config.js
 ecosystem.*.config.cjs
+*.service
 
 # LangGraph dev / Studio local state
 .langgraph_api/

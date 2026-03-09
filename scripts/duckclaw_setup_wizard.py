@@ -13,6 +13,35 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
+# --write-systemd: generar unidad systemd sin importar Rich (salida temprana)
+if "--write-systemd" in sys.argv:
+    _repo = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(_repo))
+    for _base in (Path.cwd(), _repo):
+        _env = _base / ".env"
+        if _env.is_file():
+            for _line in _env.read_text(encoding="utf-8").splitlines():
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _k, _, _v = _line.partition("=")
+                    if _k.strip():
+                        os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
+            break
+    from duckclaw.ops.providers.systemd import get_systemd_unit_content
+    _py = os.path.abspath(sys.executable)
+    _content, _fname = get_systemd_unit_content(
+        name="DuckClaw-Brain", command="-m duckclaw.agents.telegram_bot",
+        python_path=_py, cwd=str(_repo),
+    )
+    _out = _repo / _fname
+    _out.write_text(_content + "\n", encoding="utf-8")
+    print(f"Unidad systemd escrita en: {_out}")
+    print("Para instalar y activar:")
+    print(f"  sudo cp {_out} /etc/systemd/system/")
+    print("  sudo systemctl daemon-reload")
+    print("  sudo systemctl enable --now DuckClaw-Brain")
+    sys.exit(0)
+
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
@@ -381,7 +410,7 @@ module.exports = {{
     {{
       name: "{new_name}",
       script: "{venv_python}",
-      args: "-m core.integrations.telegram_bot",
+      args: "-m duckclaw.agents.telegram_bot",
       cwd: "{cwd}",
       interpreter: "none",
       autorestart: true,
@@ -1010,13 +1039,37 @@ def _run_section(
                 msg = deploy(
                     name=DEPLOY_SERVICE_NAME,
                     provider=deploy_provider,
-                    command="-m core.integrations.telegram_bot",
+                    command="-m duckclaw.agents.telegram_bot",
                     cwd=str(repo_root),
                 )
                 console.print(Panel(msg, title="duckops deploy", border_style="blue"))
+                # Si se usó auto, detectar el verdadero provider de deploy para generar la unidad
+                actual_deploy_provider = deploy_provider
+                if actual_deploy_provider == "auto":
+                    system = platform.system()
+                    if system == "Windows":
+                        actual_deploy_provider = "windows"
+                    elif system == "Linux":
+                        actual_deploy_provider = "systemd"
+                    else:
+                        actual_deploy_provider = "pm2"
+
+                if actual_deploy_provider == "systemd":
+                    from duckclaw.ops.providers.systemd import get_systemd_unit_content
+                    content, unit_name = get_systemd_unit_content(
+                        name=DEPLOY_SERVICE_NAME,
+                        command="-m duckclaw.agents.telegram_bot",
+                        python_path=os.path.abspath(sys.executable),
+                        cwd=str(repo_root),
+                    )
+                    unit_path = repo_root / unit_name
+                    unit_path.write_text(content + "\n", encoding="utf-8")
+                    console.print(f"[green]Unidad guardada en:[/] [bold]{unit_path}[/]")
+                    console.print("[dim]Instala con: sudo cp ... /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now DuckClaw-Brain[/]")
                 if "Error" in msg or "not implemented" in msg.lower():
                     console.print("[yellow]El despliegue falló. Puedes arrancar el bot manualmente después.[/]")
-            except ImportError:
+            except Exception as e:
+                console.print(f"[red]Error al desplegar el servicio o generar la unidad systemd: {e}[/]")
                 console.print("[yellow]Módulo duckclaw.ops no disponible. Instala el paquete y vuelve a intentar.[/]")
         llm_is_mlx = (state.get("llm_provider") or "").strip().lower() == "mlx"
         start_mlx = repo_root / "duckclaw" / "mlx" / "start_mlx.sh"
@@ -1079,7 +1132,7 @@ def _run_section(
         )
         try:
             ret = subprocess.call(
-                [sys.executable, "-m", "core.integrations.telegram_bot"],
+                [sys.executable, "-m", "duckclaw.agents.telegram_bot"],
                 cwd=str(repo_root),
                 env=env,
             )

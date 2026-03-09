@@ -83,6 +83,9 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         tailscale_config = data["tailscale"]
     if sft_config is None and isinstance(data.get("sft"), dict):
         sft_config = data["sft"]
+    inference_config = None
+    if isinstance(data.get("inference"), dict):
+        inference_config = data["inference"]
     homeostasis_config = _load_homeostasis_config(worker_dir, data)
     allowed_tables = data.get("allowed_tables") or []
     if isinstance(allowed_tables, str):
@@ -104,6 +107,7 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         research_config=research_config,
         tailscale_config=tailscale_config,
         sft_config=sft_config,
+        inference_config=inference_config,
         homeostasis_config=homeostasis_config,
     )
 
@@ -160,7 +164,7 @@ class WorkerSpec:
         "worker_id", "name", "schema_name", "llm_required", "temperature",
         "topology", "skills_list", "allowed_tables", "read_only", "worker_dir",
         "github_config", "research_config", "tailscale_config", "sft_config",
-        "homeostasis_config",
+        "inference_config", "homeostasis_config",
     )
 
     def __init__(
@@ -179,6 +183,7 @@ class WorkerSpec:
         research_config: Optional[dict] = None,
         tailscale_config: Optional[dict] = None,
         sft_config: Optional[dict] = None,
+        inference_config: Optional[dict] = None,
         homeostasis_config: Optional[dict] = None,
     ):
         self.worker_id = worker_id
@@ -195,4 +200,5 @@ class WorkerSpec:
         self.research_config = research_config
         self.tailscale_config = tailscale_config
         self.sft_config = sft_config
+        self.inference_config = inference_config
         self.homeostasis_config = homeostasis_config

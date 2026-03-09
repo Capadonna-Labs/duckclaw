@@ -1,5 +1,6 @@
 # ResearchWorker — Agente de Investigación Activa (Tavily + Browser-Use)
 # Spec: specs/Pipeline_de_Investigación_y_Navegacion_Autonoma_(Tavily+Browser-Use).md
+# Inferencia Elástica: specs/Inferencia_Elastica_(Hardware-Aware).md
 name: ResearchWorker
 id: research_worker
 schema_name: research_worker
@@ -8,6 +9,10 @@ read_only: false
 llm:
   required: true
   temperature: 0.3
+inference:
+  fallback_to_cloud: true
+  cloud_provider: groq
+  cloud_model: llama-3.3-70b-versatile
 skills:
   - research:
       tavily_enabled: true
