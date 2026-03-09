@@ -480,7 +480,7 @@ module.exports = {{
     elif provider == "systemd":
         unit = new_name.lower().replace(" ", "-") + ".service"
         is_user = False
-        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit], capture_output=True, timeout=3).returncode == 0:
+        if subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit], capture_output=True, timeout=3).returncode != 4:
             is_user = True
         
         cmd_prefix = ["systemctl", "--user"] if is_user else ["sudo", "systemctl"]
