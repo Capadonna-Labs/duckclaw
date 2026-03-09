@@ -89,7 +89,7 @@ def execute_role_switch(db: Any, chat_id: Any, worker_id: str) -> str:
         spec = load_manifest(wid)
         set_chat_state(db, chat_id, "worker_id", wid)
         skills = ", ".join(spec.skills_list) if spec.skills_list else "run_sql"
-        return f"✅ Rol cambiado a **{spec.name}** ({wid}). Capacidades: {skills}."
+        return f"✅ Rol cambiado a {spec.name} ({wid}). Capacidades: {skills}."
     except Exception as e:
         return f"Error al cargar rol: {e}."
 
