@@ -221,14 +221,27 @@ def _set_global_config(db: Any, key: str, value: str) -> None:
     )
 
 
-def execute_prompt(db: Any, new_prompt: str) -> str:
+def execute_prompt(db: Any, chat_id: Any, new_prompt: str) -> str:
     """/prompt [nuevo system prompt]: cambia el system prompt en caliente. Sin argumentos muestra el actual."""
     if not new_prompt:
         current = _get_global_config(db, "system_prompt")
         if not current:
+            wid = get_chat_state(db, chat_id, "worker_id")
+            default_prompt = ""
+            if wid:
+                try:
+                    from duckclaw.workers.manifest import load_manifest
+                    from duckclaw.workers.loader import load_system_prompt
+                    spec = load_manifest(wid)
+                    default_prompt = load_system_prompt(spec)
+                except Exception:
+                    pass
+            if default_prompt:
+                preview = default_prompt[:400] + "…" if len(default_prompt) > 400 else default_prompt
+                return f"System prompt actual (predeterminado de {wid}):\n{preview}\n\nPara cambiar: /prompt <tu texto>"
             return "System prompt actual: (vacío — se usa el por defecto del bot).\nPara cambiar: /prompt <tu texto>"
         preview = current[:400] + "…" if len(current) > 400 else current
-        return f"**System prompt actual:**\n{preview}\n\nPara cambiar: /prompt <nuevo texto>"
+        return f"System prompt actual (modificado):\n{preview}\n\nPara cambiar: /prompt <nuevo texto>"
     _set_global_config(db, "system_prompt", new_prompt)
     preview = new_prompt[:200] + "…" if len(new_prompt) > 200 else new_prompt
     return f"✅ System prompt actualizado.\nVista previa: {preview}"
@@ -259,7 +272,7 @@ def handle_command(db: Any, chat_id: Any, text: str) -> Optional[str]:
     if name == "reject":
         return execute_approve_reject(db, chat_id, False)
     if name in ("prompt", "system_prompt", "system"):
-        return execute_prompt(db, args)
+        return execute_prompt(db, chat_id, args)
     return None
 
 
