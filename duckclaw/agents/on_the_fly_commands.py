@@ -76,13 +76,14 @@ def execute_role_switch(db: Any, chat_id: Any, worker_id: str) -> str:
     from duckclaw.workers.factory import list_workers
     available = list_workers()
     
+    _esc = r"\_"
     wid = (worker_id or "").strip().lower()
     if not wid:
-        avail_str = "\n".join(f"- {w.replace('_', r'\_')}" for w in available) if available else "ninguna"
+        avail_str = "\n".join(f"- {w.replace('_', _esc)}" for w in available) if available else "ninguna"
         return f"Uso: /role <worker\\_id>\n\nPlantillas disponibles:\n{avail_str}"
     if wid not in available:
-        avail_str = "\n".join(f"- {w.replace('_', r'\_')}" for w in available) if available else "ninguna"
-        return f"Rol desconocido: {wid.replace('_', r'\_')}.\n\nPlantillas disponibles:\n{avail_str}"
+        avail_str = "\n".join(f"- {w.replace('_', _esc)}" for w in available) if available else "ninguna"
+        return f"Rol desconocido: {wid.replace('_', _esc)}.\n\nPlantillas disponibles:\n{avail_str}"
     try:
         from duckclaw.workers.manifest import load_manifest
         spec = load_manifest(wid)
