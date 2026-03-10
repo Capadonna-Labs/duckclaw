@@ -56,6 +56,13 @@ def run_sql(db: Any, query: str) -> str:
             except Exception:
                 pass
             return raw
+        # SingletonWriterBridge: encolar si Redis configurado (spec Auditoria_Arquitectura)
+        try:
+            from duckclaw.forge.homeostasis.singleton_writer import enqueue_write
+            if enqueue_write(q):
+                return json.dumps({"status": "ok", "queued": True})
+        except Exception:
+            pass
         db.execute(q)
         return json.dumps({"status": "ok"})
     except Exception as e:
@@ -105,16 +112,28 @@ def manage_memory(db: Any, action: str, key: str, value: str = "") -> str:
                 return json.dumps({"value": (data[0].get("value") if isinstance(data[0], dict) else None)})
             return json.dumps({"value": None})
         if action == "set":
-            db.execute(
-                f"""
-                INSERT INTO {_MEMORY_TABLE} (key, value) VALUES ('{key_safe}', '{value_safe}')
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
-                """
+            sql = (
+                f"INSERT INTO {_MEMORY_TABLE} (key, value) VALUES ('{key_safe}', '{value_safe}') "
+                f"ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP"
             )
+            try:
+                from duckclaw.forge.homeostasis.singleton_writer import enqueue_write
+                if enqueue_write(sql):
+                    return json.dumps({"status": "ok", "queued": True})
+            except Exception:
+                pass
+            db.execute(sql)
             return json.dumps({"status": "ok"})
         if action == "delete":
-            db.execute(f"DELETE FROM {_MEMORY_TABLE} WHERE key = '{key_safe}'")
-            return json.dumps({"status": "ok"})
+            sql = f"DELETE FROM {_MEMORY_TABLE} WHERE key = '{key_safe}'"
+            try:
+                from duckclaw.forge.homeostasis.singleton_writer import enqueue_write
+                if enqueue_write(sql):
+                    return json.dumps({"status": "ok", "queued": True})
+            except Exception:
+                pass
+            db.execute(sql)
+        return json.dumps({"status": "ok"})
         return json.dumps({"error": f"action debe ser get, set o delete"})
     except Exception as e:
         return json.dumps({"error": str(e)})
