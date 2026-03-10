@@ -27,32 +27,10 @@ from duckclaw.utils.sql_safe import escape_value
 
 logger = logging.getLogger(__name__)
 
+from duckclaw.utils.config import load_dotenv, parse_bool, resolve_display_model
+
 _AGENT_CONFIG_TABLE = "agent_config"
 
-
-def _load_dotenv() -> None:
-    """Carga .env en os.environ si existe (sin dependencia python-dotenv)."""
-    for base in (Path.cwd(), Path(__file__).resolve().parent.parent.parent):
-        env_file = base / ".env"
-        if env_file.is_file():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        key, _, value = line.partition("=")
-                        key = key.strip()
-                        value = value.strip()
-                        if value.startswith('"') and value.endswith('"'):
-                            value = value[1:-1].replace('\\"', '"')
-                        elif value.startswith("'") and value.endswith("'"):
-                            value = value[1:-1].replace("\\'", "'")
-                        if key:
-                            os.environ.setdefault(key, value)
-            except Exception:
-                pass
-            break
 _DEFAULT_SYSTEM_PROMPT = "Eres el asistente de Lumi Store, una tienda online. Tienes acceso a una base de datos. Responde de forma breve y clara."
 _DEFAULT_FRAMEWORK = "langgraph"
 
@@ -159,7 +137,7 @@ def _ensure_agent_config(db: Any) -> None:
             if k in ("llm_provider", "llm_model", "llm_base_url") and v:
                 defaults.append((k, str(v)))
             if k in ("save_grpo_traces", "send_to_langsmith") and v is not None:
-                defaults.append((k, "true" if (v is True or str(v).lower() in ("true", "1", "yes", "y", "sí", "si")) else "false"))
+                defaults.append((k, "true" if parse_bool(v) else "false"))
         for k, v in defaults:
             if k not in keys_present:
                 esc = escape_value(str(v), max_len=16384)
@@ -188,7 +166,7 @@ def _get_config(db: Any) -> dict:
         if key not in out or out.get(key) == "":
             wv = wizard.get(key)
             if wv is not None:
-                out[key] = bool(wv) if isinstance(wv, bool) else str(wv).lower() in ("true", "1", "yes", "y", "sí", "si")
+                out[key] = parse_bool(wv)
     # Precedencia final: variables de entorno de ejecución.
     # El instalador exporta DUCKCLAW_LLM_* al arrancar, así que deben poder
     # sobrescribir valores viejos persistidos en agent_config.
@@ -201,9 +179,9 @@ def _get_config(db: Any) -> dict:
         if val:
             out[key] = val
     for key, env_key in (("save_grpo_traces", "DUCKCLAW_SAVE_GRPO_TRACES"), ("send_to_langsmith", "DUCKCLAW_SEND_TO_LANGSMITH")):
-        ev = os.environ.get(env_key, "").strip().lower()
+        ev = os.environ.get(env_key, "").strip()
         if ev:
-            out[key] = ev in ("true", "1", "yes", "y", "sí", "si")
+            out[key] = parse_bool(ev)
     return out
 
 
@@ -274,7 +252,7 @@ def _build_graph_via_forge(
 
 
 def _run_bot() -> None:
-    _load_dotenv()
+    load_dotenv()
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         _log("Falta TELEGRAM_BOT_TOKEN. Exporta la variable o ponla en .env en el directorio actual o en la raíz del proyecto.")
@@ -365,30 +343,10 @@ def _run_bot() -> None:
             llm_model = config.get("llm_model") or ""
             llm_base_url = config.get("llm_base_url") or ""
             store_db = _get_store_db(config)
-            save_tr = config.get("save_grpo_traces", False)
-            if isinstance(save_tr, str):
-                save_tr = str(save_tr).lower() in ("true", "1", "yes", "y", "sí", "si")
-            send_ls = config.get("send_to_langsmith", False)
-            if isinstance(send_ls, str):
-                send_ls = str(send_ls).lower() in ("true", "1", "yes", "y", "sí", "si")
+            save_tr = parse_bool(config.get("save_grpo_traces", False))
+            send_ls = parse_bool(config.get("send_to_langsmith", False))
 
-            # Resolver el model ID — misma prioridad que build_llm para consistencia
-            def _resolve_display_model(provider: str, model: str, base_url: str) -> str:
-                if provider == "mlx":
-                    # 1. MLX_MODEL_ID del env (ruta local — más confiable)
-                    mid = os.environ.get("MLX_MODEL_ID", "").strip()
-                    if not mid:
-                        mid = os.environ.get("MLX_MODEL_PATH", "").strip()
-                    if mid:
-                        # Mostrar solo el nombre del directorio para brevedad
-                        name = mid.rstrip("/").rsplit("/", 1)[-1]
-                        return f"mlx:{name}"
-                    return f"mlx:{model or 'local'}"
-                if model:
-                    return f"{provider}:{model}"
-                return provider or "none_llm"
-
-            display_model = _resolve_display_model(llm_provider, llm_model, llm_base_url)
+            display_model = resolve_display_model(llm_provider, llm_model)
             _log(f"🤔 [{display_model}] pensando...")
 
             from duckclaw.agents.on_the_fly_commands import (
@@ -613,12 +571,8 @@ def _run_bot() -> None:
             body = (parts[1] if len(parts) > 1 else "").strip()
             if not body:
                 config = _get_config(self.db)
-                save_tr = config.get("save_grpo_traces", False)
-                if isinstance(save_tr, str):
-                    save_tr = str(save_tr).lower() in ("true", "1", "yes", "y", "sí", "si")
-                send_ls = config.get("send_to_langsmith", False)
-                if isinstance(send_ls, str):
-                    send_ls = str(send_ls).lower() in ("true", "1", "yes", "y", "sí", "si")
+                save_tr = parse_bool(config.get("save_grpo_traces", False))
+                send_ls = parse_bool(config.get("send_to_langsmith", False))
                 asyncio.create_task(
                     message.reply_text(
                         f"Config actual:\nframework={config.get('framework', _DEFAULT_FRAMEWORK)}\n"

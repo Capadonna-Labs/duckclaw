@@ -30,29 +30,9 @@ from typing import Any, AsyncGenerator, Optional
 
 # ── dotenv ─────────────────────────────────────────────────────────────────────
 
-def _load_dotenv() -> None:
-    for base in (Path.cwd(), Path(__file__).resolve().parent.parent.parent):
-        env_file = base / ".env"
-        if env_file.is_file():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, value = line.partition("=")
-                    key = key.strip()
-                    value = value.strip()
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = value[1:-1]
-                    if key:
-                        os.environ.setdefault(key, value)
-            except Exception:
-                pass
-            break
+from duckclaw.utils.config import load_dotenv, resolve_display_model
 
-_load_dotenv()
+load_dotenv()
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 
@@ -175,14 +155,7 @@ _pre_init()
 
 
 def _resolve_display_model() -> str:
-    provider = os.environ.get("DUCKCLAW_LLM_PROVIDER", "mlx")
-    if provider == "mlx":
-        mid = (os.environ.get("MLX_MODEL_ID") or os.environ.get("MLX_MODEL_PATH") or "").strip()
-        if mid:
-            return f"mlx:{mid.rstrip('/').rsplit('/', 1)[-1]}"
-        return "mlx:local"
-    model = os.environ.get("DUCKCLAW_LLM_MODEL", "")
-    return f"{provider}:{model}" if model else provider
+    return resolve_display_model()
 
 
 # ── Pydantic models ────────────────────────────────────────────────────────────

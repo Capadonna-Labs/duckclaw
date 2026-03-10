@@ -41,7 +41,8 @@ async def system_health():
     # Tailscale
     if shutil.which("tailscale"):
         try:
-            r = subprocess.run(
+            r = await asyncio.to_thread(
+                subprocess.run,
                 ["tailscale", "status", "--json"],
                 capture_output=True,
                 text=True,
@@ -62,7 +63,7 @@ async def system_health():
         db_path = _get_db_path()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         db = DuckClaw(db_path)
-        db.query("SELECT 1")
+        await asyncio.to_thread(db.query, "SELECT 1")
         result["duckdb"] = "ok"
     except Exception:
         logger.debug("DuckDB health check failed", exc_info=True)
@@ -101,7 +102,7 @@ async def system_logs(name: str = "", lines: int = 100):
             if not _SAFE_NAME_RE.match(name.strip()):
                 return {"detail": "Nombre de proceso inválido", "logs": []}
             cmd.append(name.strip())
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        r = await asyncio.to_thread(subprocess.run, cmd, capture_output=True, text=True, timeout=10)
         out = (r.stdout or "") + (r.stderr or "")
         log_lines = [ln.strip() for ln in out.splitlines() if ln.strip()][:200]
         return {"logs": log_lines}

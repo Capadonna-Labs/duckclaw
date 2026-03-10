@@ -42,27 +42,8 @@ def _normalize_prompt_for_grouping(prompt: str) -> str:
 
 def _load_dotenv() -> None:
     """Carga .env en os.environ si existe (para notebooks que no heredan variables)."""
-    for base in (Path.cwd(), Path(__file__).resolve().parents[2]):
-        env_file = base / ".env"
-        if env_file.is_file():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if "=" in line:
-                        key, _, value = line.partition("=")
-                        key = key.strip()
-                        value = value.strip()
-                        if value.startswith('"') and value.endswith('"'):
-                            value = value[1:-1].replace('\\"', '"')
-                        elif value.startswith("'") and value.endswith("'"):
-                            value = value[1:-1].replace("\\'", "'")
-                        if key:
-                            os.environ.setdefault(key, value)
-            except Exception:
-                pass
-            break
+    from duckclaw.utils.config import load_dotenv
+    load_dotenv()
 
 
 def _send_to_langsmith(

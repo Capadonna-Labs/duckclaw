@@ -14,28 +14,9 @@ import os
 from pathlib import Path
 
 # Load .env
-def _load_dotenv() -> None:
-    for base in (Path.cwd(), Path(__file__).resolve().parent.parent.parent):
-        env_file = base / ".env"
-        if env_file.is_file():
-            try:
-                for line in env_file.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, value = line.partition("=")
-                    key, value = key.strip(), value.strip()
-                    if value.startswith('"') and value.endswith('"'):
-                        value = value[1:-1]
-                    elif value.startswith("'") and value.endswith("'"):
-                        value = value[1:-1]
-                    if key:
-                        os.environ.setdefault(key, value)
-            except Exception:
-                pass
-            break
+from duckclaw.utils.config import load_dotenv
 
-_load_dotenv()
+load_dotenv()
 
 try:
     from fastapi import FastAPI
