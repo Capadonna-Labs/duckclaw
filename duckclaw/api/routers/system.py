@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,7 +14,11 @@ from typing import Any, AsyncGenerator
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
+
+_SAFE_NAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+$")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
@@ -48,7 +54,7 @@ async def system_health():
                 if self_obj.get("Online", True):
                     result["tailscale"] = "ok"
         except Exception:
-            pass
+            logger.debug("Tailscale health check failed", exc_info=True)
 
     # DuckDB
     try:
@@ -59,7 +65,7 @@ async def system_health():
         db.query("SELECT 1")
         result["duckdb"] = "ok"
     except Exception:
-        pass
+        logger.debug("DuckDB health check failed", exc_info=True)
 
     # MLX
     base_url = (
@@ -75,7 +81,7 @@ async def system_health():
             if resp.status == 200:
                 result["mlx"] = "ok"
     except Exception:
-        pass
+        logger.debug("MLX health check failed", exc_info=True)
 
     return result
 
@@ -92,6 +98,8 @@ async def system_logs(name: str = "", lines: int = 100):
     try:
         cmd = ["pm2", "logs", "--lines", str(min(lines, 500)), "--nostream", "--raw"]
         if name.strip():
+            if not _SAFE_NAME_RE.match(name.strip()):
+                return {"detail": "Nombre de proceso inválido", "logs": []}
             cmd.append(name.strip())
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         out = (r.stdout or "") + (r.stderr or "")
@@ -122,6 +130,9 @@ async def system_logs_stream(name: str = ""):
         try:
             cmd = ["pm2", "logs", "--raw", "--lines", "0"]
             if name.strip():
+                if not _SAFE_NAME_RE.match(name.strip()):
+                    yield 'data: {"error": "Nombre de proceso inválido"}\n\n'
+                    return
                 cmd.append(name.strip())
             proc = await asyncio.create_subprocess_exec(
                 *cmd,

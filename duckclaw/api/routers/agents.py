@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -12,6 +13,10 @@ from typing import Any, AsyncGenerator, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+
+from duckclaw.utils.sql_safe import escape_value, is_safe_identifier
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 
@@ -119,7 +124,7 @@ async def _ainvoke(
 
 def _safe_sql(s: str) -> str:
     """Escapa comillas simples para SQL."""
-    return (s or "").replace("'", "''")[:256]
+    return escape_value(s or "", max_len=256)
 
 
 def _sanitize_for_telegram(text: str) -> str:
@@ -141,7 +146,7 @@ def _persist_turn(db: Any, session_id: str, worker_id: str, role: str, content: 
     """Guarda un turno en api_conversation."""
     _ensure_api_conversation_table(db)
     sid, wid, r = _safe_sql(session_id), _safe_sql(worker_id), _safe_sql(role)
-    esc = (content or "").replace("'", "''")[:16384]
+    esc = escape_value(content or "", max_len=16384)
     db.execute(
         f"INSERT INTO api_conversation (session_id, worker_id, role, content) "
         f"VALUES ('{sid}', '{wid}', '{r}', '{esc}')"
@@ -167,6 +172,7 @@ def _get_history(db: Any, session_id: str, worker_id: str, limit: int = 6) -> li
                 out.append({"role": role, "content": content})
         return out[-(limit * 2):]
     except Exception:
+        logger.warning("Error fetching history for session=%s worker=%s", session_id, worker_id, exc_info=True)
         return []
 
 
@@ -186,6 +192,8 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
     Envía un mensaje al agente. Retorna StreamingResponse (SSE) token por token o JSON.
     Persiste en api_conversation para historial.
     """
+    if not is_safe_identifier(worker_id):
+        raise HTTPException(status_code=400, detail="worker_id contiene caracteres inválidos")
     try:
         graph = _get_or_build_worker_graph(worker_id)
     except HTTPException:

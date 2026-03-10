@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from duckclaw.utils.sql_safe import escape_value, is_safe_identifier
+
 # Solo lectura para run_sql cuando no es escritura
 _READ_ONLY = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE)\s", re.IGNORECASE)
 # Operaciones destructivas o de acceso al sistema de archivos — siempre bloqueadas
@@ -76,9 +78,9 @@ def inspect_schema(db: Any) -> str:
         lines = []
         for t in tables:
             name = t.get("table_name") if isinstance(t, dict) else None
-            if not name:
+            if not name or not is_safe_identifier(str(name)):
                 continue
-            name_esc = str(name).replace("'", "''")
+            name_esc = escape_value(str(name))
             cols_raw = json.loads(db.query(
                 f"SELECT column_name, data_type FROM information_schema.columns "
                 f"WHERE table_schema = 'main' AND table_name = '{name_esc}' ORDER BY ordinal_position"
@@ -93,8 +95,8 @@ def inspect_schema(db: Any) -> str:
 def manage_memory(db: Any, action: str, key: str, value: str = "") -> str:
     """Gestiona preferencias del usuario. action: 'get' | 'set' | 'delete'. key: clave. value: solo para 'set'."""
     _ensure_memory_table(db)
-    key_safe = str(key).replace("'", "''")[:512]
-    value_safe = str(value).replace("'", "''")[:4096]
+    key_safe = escape_value(str(key), max_len=512)
+    value_safe = escape_value(str(value), max_len=4096)
     try:
         if action == "get":
             r = db.query(

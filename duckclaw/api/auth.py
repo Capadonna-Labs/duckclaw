@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import secrets
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # Rutas públicas (sin auth)
 PUBLIC_PATHS = frozenset({
@@ -32,7 +36,7 @@ def verify_tailscale_key(request: Any) -> bool:
     if not auth_key:
         return False
     header_key = request.headers.get("X-Tailscale-Auth-Key", "").strip()
-    return header_key == auth_key
+    return secrets.compare_digest(header_key, auth_key)
 
 
 def verify_jwt(request: Any) -> Optional[dict]:
@@ -55,8 +59,10 @@ def verify_jwt(request: Any) -> Optional[dict]:
         payload = pyjwt.decode(token, secret, algorithms=["HS256"])
         return dict(payload) if isinstance(payload, dict) else None
     except ImportError:
+        logger.warning("PyJWT not installed; JWT verification disabled")
         return None
     except Exception:
+        logger.debug("JWT verification failed", exc_info=True)
         return None
 
 

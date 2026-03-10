@@ -16,11 +16,16 @@ Lee variables desde .env en el directorio actual o en la raíz del proyecto.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+from duckclaw.utils.sql_safe import escape_value
+
+logger = logging.getLogger(__name__)
 
 _AGENT_CONFIG_TABLE = "agent_config"
 
@@ -94,12 +99,13 @@ def _persist_conversation(db: Any, chat_id: Any, role: str, content: str) -> Non
     if not content or not str(content).strip():
         return
     try:
-        esc = str(content).replace("'", "''")[:16384]
+        esc = escape_value(str(content), max_len=16384)
+        role_esc = escape_value(str(role), max_len=32)
         db.execute(
-            f"INSERT INTO telegram_conversation (chat_id, role, content) VALUES ({int(chat_id)}, '{role}', '{esc}')"
+            f"INSERT INTO telegram_conversation (chat_id, role, content) VALUES ({int(chat_id)}, '{role_esc}', '{esc}')"
         )
     except Exception:
-        pass
+        logger.warning("Error persisting conversation for chat_id=%s", chat_id, exc_info=True)
 
 
 def _get_db_path() -> str:
@@ -156,7 +162,7 @@ def _ensure_agent_config(db: Any) -> None:
                 defaults.append((k, "true" if (v is True or str(v).lower() in ("true", "1", "yes", "y", "sí", "si")) else "false"))
         for k, v in defaults:
             if k not in keys_present:
-                esc = str(v).replace("'", "''")[:16384]
+                esc = escape_value(str(v), max_len=16384)
                 db.execute(
                     f"INSERT INTO {_AGENT_CONFIG_TABLE} (key, value) VALUES ('{k}', '{esc}')"
                 )
@@ -203,8 +209,8 @@ def _get_config(db: Any) -> dict:
 
 def _set_config(db: Any, key: str, value: str) -> None:
     _ensure_agent_config(db)
-    k = str(key).replace("'", "''")[:128]
-    v = str(value).replace("'", "''")[:16384]
+    k = escape_value(str(key), max_len=128)
+    v = escape_value(str(value), max_len=16384)
     db.execute(
         f"""
         INSERT INTO {_AGENT_CONFIG_TABLE} (key, value) VALUES ('{k}', '{v}')
@@ -311,7 +317,7 @@ def _run_bot() -> None:
         from duckclaw.agents.graph_rag import ensure_graph_rag_schema
         ensure_graph_rag_schema(db)
     except Exception:
-        pass
+        logger.debug("GraphRAG schema init skipped", exc_info=True)
 
     class DynamicAgentBot(TelegramBotBase):
         def handle_message(self, update: Any) -> None:
@@ -438,7 +444,7 @@ def _run_bot() -> None:
             try:
                 save_last_audit(self.db, chat_id, elapsed_ms)
             except Exception:
-                pass
+                logger.warning("Error saving audit for chat_id=%s", chat_id, exc_info=True)
             reply_for_user = reply
             try:
                 from duckclaw.utils.format import strip_paths_from_reply

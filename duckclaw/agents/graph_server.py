@@ -94,8 +94,9 @@ async def _tailscale_auth_middleware(request: Request, call_next):
     path = request.url.path.rstrip("/") or "/"
     if path in ("/", "/health"):
         return await call_next(request)
+    import secrets as _secrets
     header_key = request.headers.get("X-Tailscale-Auth-Key", "").strip()
-    if header_key != auth_key:
+    if not _secrets.compare_digest(header_key, auth_key):
         return JSONResponse(
             status_code=401,
             content={"detail": "X-Tailscale-Auth-Key inválida o faltante"},

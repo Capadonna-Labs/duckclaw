@@ -340,12 +340,10 @@ def plot_from_sql(
         import matplotlib.pyplot as plt
     except ImportError:
         return "Error: instala matplotlib (pip install matplotlib)"
-    sql_upper = (sql or "").strip().upper()
-    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
-        return "Error: solo se permiten consultas SELECT o WITH."
-    for blocked in ("DROP", "INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "TRUNCATE"):
-        if blocked in sql_upper:
-            return f"Error: no se permite {blocked} en la consulta."
+    from duckclaw.utils.sql_safe import validate_read_sql
+    ok, err = validate_read_sql(sql)
+    if not ok:
+        return f"Error: {err}"
     try:
         raw = db.query(sql)
         rows = json.loads(raw) if isinstance(raw, str) else (raw or [])

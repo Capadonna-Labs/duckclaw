@@ -7,10 +7,15 @@ Spec: specs/interfaz_de_comandos_dinamicos_On-the-Fly_CLI.md
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 from typing import Any, Optional, Tuple
+
+from duckclaw.utils.sql_safe import escape_value
+
+logger = logging.getLogger(__name__)
 
 _PREFIX = "chat_"
 
@@ -37,22 +42,22 @@ def _ensure_agent_config(db: Any) -> None:
 def get_chat_state(db: Any, chat_id: Any, key: str) -> str:
     """Read a chat-scoped config key from agent_config."""
     _ensure_agent_config(db)
-    k = _chat_key(chat_id, key).replace("'", "''")[:200]
+    k = escape_value(_chat_key(chat_id, key), max_len=200)
     try:
         r = db.query(f"SELECT value FROM {_AGENT_CONFIG_TABLE} WHERE key = '{k}' LIMIT 1")
         rows = json.loads(r) if isinstance(r, str) else (r or [])
         if rows and isinstance(rows[0], dict):
             return (rows[0].get("value") or "").strip()
     except Exception:
-        pass
+        logger.debug("Error reading chat state key=%s", key, exc_info=True)
     return ""
 
 
 def set_chat_state(db: Any, chat_id: Any, key: str, value: str) -> None:
     """Write a chat-scoped config key to agent_config."""
     _ensure_agent_config(db)
-    k = _chat_key(chat_id, key).replace("'", "''")[:128]
-    v = str(value).replace("'", "''")[:16384]
+    k = escape_value(_chat_key(chat_id, key), max_len=128)
+    v = escape_value(str(value), max_len=16384)
     db.execute(
         f"""
         INSERT INTO {_AGENT_CONFIG_TABLE} (key, value) VALUES ('{k}', '{v}')
@@ -198,22 +203,22 @@ def execute_approve_reject(db: Any, chat_id: Any, approved: bool) -> str:
 def _get_global_config(db: Any, key: str) -> str:
     """Read a global config key from agent_config (e.g. system_prompt)."""
     _ensure_agent_config(db)
-    k = str(key).replace("'", "''")[:128]
+    k = escape_value(str(key), max_len=128)
     try:
         r = db.query(f"SELECT value FROM {_AGENT_CONFIG_TABLE} WHERE key = '{k}' LIMIT 1")
         rows = json.loads(r) if isinstance(r, str) else (r or [])
         if rows and isinstance(rows[0], dict):
             return (rows[0].get("value") or "").strip()
     except Exception:
-        pass
+        logger.debug("Error reading global config key=%s", key, exc_info=True)
     return ""
 
 
 def _set_global_config(db: Any, key: str, value: str) -> None:
     """Write a global config key to agent_config."""
     _ensure_agent_config(db)
-    k = str(key).replace("'", "''")[:128]
-    v = str(value).replace("'", "''")[:16384]
+    k = escape_value(str(key), max_len=128)
+    v = escape_value(str(value), max_len=16384)
     db.execute(
         f"""
         INSERT INTO {_AGENT_CONFIG_TABLE} (key, value) VALUES ('{k}', '{v}')

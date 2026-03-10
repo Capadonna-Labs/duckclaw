@@ -8,9 +8,11 @@ from typing import Any, Optional
 
 from langchain_core.tools import tool
 
+from duckclaw.utils.sql_safe import escape_value, escape_like
+
 
 def _esc(s: str) -> str:
-    return str(s).replace("'", "''")
+    return escape_value(str(s))
 
 
 def build_store_tools(
@@ -28,9 +30,10 @@ def build_store_tools(
         """Registra una venta: busca el producto por nombre y talla, resta 1 al stock y registra la transacción.
         item_name: nombre del producto (ej. Blusa, Pantalón). size: talla (ej. XL, 2XL). price: precio de venta. method: método de pago (ej. efectivo, tarjeta, transferencia)."""
         try:
-            name_esc, size_esc = _esc(item_name), _esc(size)
+            name_like = escape_like(item_name)
+            size_esc = _esc(size)
             sql_find = (
-                f"SELECT sku, stock_count FROM inventory WHERE LOWER(name) LIKE LOWER('%{name_esc}%') AND LOWER(TRIM(size)) = LOWER('{size_esc}') LIMIT 1"
+                f"SELECT sku, stock_count FROM inventory WHERE LOWER(name) LIKE LOWER('%{name_like}%') ESCAPE '\\' AND LOWER(TRIM(size)) = LOWER('{size_esc}') LIMIT 1"
             )
             rows = store_db.query(sql_find)
             _log_db(sql_find, 1)
@@ -62,7 +65,7 @@ def build_store_tools(
         try:
             where_parts = []
             if name_filter and str(name_filter).strip():
-                where_parts.append(f"LOWER(name) LIKE LOWER('%{_esc(str(name_filter).strip())}%')")
+                where_parts.append(f"LOWER(name) LIKE LOWER('%{escape_like(str(name_filter).strip())}%') ESCAPE '\\'")
             if size_filter and str(size_filter).strip():
                 where_parts.append(f"LOWER(TRIM(size)) = LOWER('{_esc(str(size_filter).strip())}')")
             where = (" WHERE " + " AND ".join(where_parts)) if where_parts else ""
