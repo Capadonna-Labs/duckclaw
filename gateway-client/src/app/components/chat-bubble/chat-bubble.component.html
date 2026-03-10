@@ -1,0 +1,68 @@
+<div class="bubble-wrapper">
+  @if (open) {
+    <div class="chat-panel">
+      <header class="panel-header">
+        <h3>Chat con trabajadores</h3>
+        <button class="btn-close" (click)="toggle()">×</button>
+      </header>
+
+      <div class="worker-selector">
+        <label class="mode-toggle">
+          <input type="checkbox" [(ngModel)]="groupMode" />
+          <span>Modo grupo (varios workers)</span>
+        </label>
+        <div class="worker-chips">
+          @for (w of workers; track w) {
+            <button
+              class="chip"
+              [class.selected]="selectedWorkers.includes(w)"
+              [class.multi]="groupMode"
+              (click)="toggleWorker(w)"
+            >
+              {{ w }}
+            </button>
+          }
+        </div>
+      </div>
+
+      <div class="messages">
+        @for (msg of messages; track $index) {
+          <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+            <span class="role">
+              {{ msg.role === 'user' ? 'Tú' : (msg.workerId ? msg.workerId : 'Agente') }}
+            </span>
+            <p class="content">{{ msg.content }}</p>
+          </div>
+        }
+        @if (loading) {
+          <div class="message assistant loading">
+            <span class="role">...</span>
+            <p class="content">Pensando...</p>
+          </div>
+        }
+      </div>
+
+      @if (error) {
+        <div class="error">{{ error }}</div>
+      }
+
+      <div class="input-area">
+        <input
+          type="text"
+          [(ngModel)]="message"
+          (keydown.enter)="send()"
+          placeholder="Mensaje..."
+          [disabled]="loading"
+        />
+        <button (click)="send()" [disabled]="loading || !message.trim() || selectedWorkers.length === 0">
+          Enviar
+        </button>
+      </div>
+      <button class="btn-clear" (click)="clear()">Limpiar</button>
+    </div>
+  }
+
+  <button class="bubble-btn" (click)="toggle()" [class.open]="open" title="Abrir chat">
+    💬
+  </button>
+</div>

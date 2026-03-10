@@ -1,0 +1,57 @@
+<div class="board">
+  <header class="board-header">
+    <h1>Tablero</h1>
+    <div class="add-task">
+      <input
+        type="text"
+        [(ngModel)]="newTaskTitle"
+        (keydown.enter)="addTask()"
+        placeholder="Nueva tarea..."
+      />
+      <select [(ngModel)]="newTaskColumn">
+        @for (col of columns; track col.id) {
+          <option [value]="col.id">{{ col.title }}</option>
+        }
+      </select>
+      <button (click)="addTask()" [disabled]="!newTaskTitle.trim()">Añadir</button>
+    </div>
+  </header>
+
+  <div class="columns" cdkDropListGroup>
+    @for (col of columns; track col.id) {
+      <div class="column">
+        <h2 class="column-title">{{ col.title }}</h2>
+        <div
+          cdkDropList
+          [cdkDropListData]="tasksByColumn[col.id]"
+          (cdkDropListDropped)="drop($event)"
+          class="task-list"
+        >
+          @for (task of tasksByColumn[col.id]; track task.id) {
+            <div class="task-card" cdkDrag>
+              @if (editingId === task.id) {
+                <div class="task-edit">
+                  <input
+                    #editInput
+                    type="text"
+                    [value]="task.title"
+                    (keydown.enter)="saveEdit(task, editInput.value)"
+                    (keydown.escape)="cancelEdit()"
+                    (blur)="saveEdit(task, editInput.value)"
+                  />
+                </div>
+              } @else {
+                <div class="task-content" (dblclick)="startEdit(task)">
+                  <span class="task-title">{{ task.title }}</span>
+                  <button class="btn-delete" (click)="deleteTask(task); $event.stopPropagation()" title="Eliminar">
+                    ×
+                  </button>
+                </div>
+              }
+            </div>
+          }
+        </div>
+      </div>
+    }
+  </div>
+</div>

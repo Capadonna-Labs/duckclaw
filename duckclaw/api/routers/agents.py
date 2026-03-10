@@ -16,6 +16,13 @@ from pydantic import BaseModel, Field
 router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 
 # Cache de grafos por worker_id (evitar rebuild en cada request)
+
+
+@router.get("/workers", summary="Lista de workers virtuales disponibles")
+async def list_workers():
+    """Retorna los worker_id disponibles en templates/workers/."""
+    from duckclaw.workers.factory import list_workers as _list_workers
+    return {"workers": _list_workers()}
 _graph_cache: dict[str, Any] = {}
 
 

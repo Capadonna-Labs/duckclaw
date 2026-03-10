@@ -57,6 +57,15 @@ def test_agent_history_requires_session(client: TestClient) -> None:
     assert data.get("worker_id") == "finanz"
 
 
+def test_agent_workers_list(client: TestClient) -> None:
+    r = client.get("/api/v1/agent/workers")
+    assert r.status_code == 200
+    data = r.json()
+    assert "workers" in data
+    assert isinstance(data["workers"], list)
+    assert "finanz" in data["workers"]
+
+
 def test_forget_command_via_api_succeeds(client: TestClient) -> None:
     """POST /forget with session_id='default' succeeds (fix for API gateway bug)."""
     r = client.post(

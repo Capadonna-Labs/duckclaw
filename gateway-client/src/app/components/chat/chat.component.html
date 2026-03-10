@@ -1,0 +1,37 @@
+<div class="chat-container">
+  <header class="chat-header">
+    <h1>DuckClaw API Gateway</h1>
+    <p class="subtitle">Chat con agente {{ workerId }} · Sesión: {{ sessionId }}</p>
+  </header>
+
+  <div class="messages" #messagesContainer>
+    @for (msg of messages; track $index) {
+      <div class="message" [class.user]="msg.role === 'user'" [class.assistant]="msg.role === 'assistant'">
+        <span class="role">{{ msg.role === 'user' ? 'Tú' : 'Agente' }}</span>
+        <p class="content">{{ msg.content }}</p>
+      </div>
+    }
+    @if (loading) {
+      <div class="message assistant loading">
+        <span class="role">Agente</span>
+        <p class="content">Pensando...</p>
+      </div>
+    }
+  </div>
+
+  @if (error) {
+    <div class="error">{{ error }}</div>
+  }
+
+  <div class="input-area">
+    <input
+      type="text"
+      [(ngModel)]="message"
+      (keydown.enter)="send()"
+      placeholder="Escribe un mensaje o /forget para borrar historial..."
+      [disabled]="loading"
+    />
+    <button (click)="send()" [disabled]="loading || !message.trim()">Enviar</button>
+    <button class="secondary" (click)="clear()" [disabled]="loading">Limpiar</button>
+  </div>
+</div>
