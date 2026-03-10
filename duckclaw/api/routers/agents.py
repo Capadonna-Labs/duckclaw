@@ -144,6 +144,12 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
             reply = await _ainvoke(graph, payload.message, history, session_id)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
+            try:
+                from duckclaw.forge.homeostasis.notify import notify_ask_task
+
+                notify_ask_task(worker_id=worker_id, session_id=session_id, trigger="task_complete")
+            except Exception:
+                pass
             for word in reply.split(" "):
                 yield f"data: {word} \n\n"
                 await asyncio.sleep(0.02)

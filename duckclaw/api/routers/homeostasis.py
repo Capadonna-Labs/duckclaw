@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/v1/homeostasis", tags=["homeostasis"])
@@ -130,6 +130,37 @@ async def homeostasis_status():
                     })
         out.append({"worker_id": worker_id, "status": status, "beliefs": beliefs_out})
     return out
+
+
+class AskTaskRequest(BaseModel):
+    """Payload opcional para POST /homeostasis/ask_task."""
+    worker_id: Optional[str] = Field(None, description="ID del worker")
+    session_id: str = Field("default", description="ID de sesión")
+    suggested_objectives: Optional[list[str]] = Field(
+        None,
+        description="Objetivos a priorizar (ej. aumentar ventas, disminuir tiempo de respuesta, etc.)",
+    )
+
+
+@router.post("/ask_task", summary="Disparar pregunta '¿Qué tarea hacer?' (timer o manual)")
+async def homeostasis_ask_task(payload: Optional[AskTaskRequest] = Body(default=None)):
+    """
+    Envía webhook a n8n para preguntar al usuario qué tarea hacer.
+    Incluye objetivos sugeridos para priorizar (ventas, tiempo de respuesta, stock, etc.).
+    Usado por el timer systemd o invocación manual.
+    """
+    from duckclaw.forge.homeostasis.notify import notify_ask_task
+
+    worker_id = payload.worker_id if payload else None
+    session_id = (payload.session_id or "default") if payload else "default"
+    objectives = payload.suggested_objectives if payload else None
+    notify_ask_task(
+        worker_id=worker_id,
+        session_id=session_id,
+        trigger="timer",
+        suggested_objectives=objectives,
+    )
+    return {"ok": True, "trigger": "timer"}
 
 
 class HomeostasisActionRequest(BaseModel):

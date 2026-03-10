@@ -55,6 +55,12 @@ async def run_chat_job(
             result = await loop.run_in_executor(None, graph.invoke, state)
 
         reply = str(result.get("reply") or result.get("output") or "Sin respuesta.")
+        try:
+            from duckclaw.forge.homeostasis.notify import notify_ask_task
+
+            notify_ask_task(worker_id=worker_id, session_id=session_id, trigger="task_complete")
+        except Exception:
+            pass
         return reply
     finally:
         if manager:

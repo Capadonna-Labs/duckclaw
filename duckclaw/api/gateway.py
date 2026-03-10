@@ -95,6 +95,7 @@ async def root():
             "/api/v1/activity/status",
             "/api/v1/activity/chat/queue",
             "/api/v1/homeostasis/status",
+            "/api/v1/homeostasis/ask_task",
             "/api/v1/homeostasis/{worker_id}/action",
             "/api/v1/system/health",
             "/api/v1/system/logs",

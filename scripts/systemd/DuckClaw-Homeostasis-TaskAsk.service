@@ -1,0 +1,14 @@
+# DuckClaw-Homeostasis-TaskAsk — dispara POST /api/v1/homeostasis/ask_task
+# Ejecutado por DuckClaw-Homeostasis-TaskAsk.timer cada 2 horas.
+# Requiere: DuckClaw-Gateway en marcha (puerto 8000)
+#
+# Copiar a: sudo cp scripts/systemd/DuckClaw-Homeostasis-TaskAsk.service /etc/systemd/system/
+
+[Unit]
+Description=DuckClaw homeostasis: preguntar qué tarea hacer
+After=DuckClaw-Gateway.service network.target
+
+[Service]
+Type=oneshot
+User=capadonna
+ExecStart=/usr/bin/curl -s -X POST -H "Content-Type: application/json" -d '{}' http://localhost:8000/api/v1/homeostasis/ask_task

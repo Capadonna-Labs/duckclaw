@@ -49,6 +49,23 @@ def test_homeostasis_status(client: TestClient) -> None:
     assert isinstance(r.json(), list)
 
 
+def test_homeostasis_ask_task(client: TestClient) -> None:
+    r = client.post("/api/v1/homeostasis/ask_task", json={})
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("ok") is True
+    assert data.get("trigger") == "timer"
+
+
+def test_homeostasis_ask_task_with_objectives(client: TestClient) -> None:
+    r = client.post(
+        "/api/v1/homeostasis/ask_task",
+        json={"suggested_objectives": ["Aumentar ventas", "Disminuir tiempo de respuesta"]},
+    )
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+
+
 def test_agent_history_requires_session(client: TestClient) -> None:
     r = client.get("/api/v1/agent/personal_finance/history?session_id=s1")
     assert r.status_code == 200

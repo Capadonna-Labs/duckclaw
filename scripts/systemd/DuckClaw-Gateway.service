@@ -1,0 +1,23 @@
+# DuckClaw-Gateway — API Gateway (FastAPI)
+# Copiar a: sudo cp scripts/systemd/DuckClaw-Gateway.service /etc/systemd/system/
+# Habilitar: sudo systemctl enable DuckClaw-Gateway
+# Iniciar:   sudo systemctl start DuckClaw-Gateway
+# Logs:      sudo journalctl -u DuckClaw-Gateway -f
+#
+# Requisitos: DUCKCLAW_DB_PATH, opcional N8N_HOMEOSTASIS_ASK_TASK_WEBHOOK_URL
+# Puerto por defecto: 8000 (DUCKCLAW_API_PORT)
+
+[Unit]
+Description=DuckClaw API Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=capadonna
+WorkingDirectory=/home/capadonna/duckclaw
+ExecStart=/home/capadonna/duckclaw/.venv/bin/python -m duckclaw.api.gateway --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

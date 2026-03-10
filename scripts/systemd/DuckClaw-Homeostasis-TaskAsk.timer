@@ -1,0 +1,22 @@
+# DuckClaw-Homeostasis-TaskAsk.timer — dispara ask_task esporádicamente
+# Cada 2 horas. Editar OnCalendar para cambiar el intervalo.
+#
+# Copiar a: sudo cp scripts/systemd/DuckClaw-Homeostasis-TaskAsk.timer /etc/systemd/system/
+# Habilitar: sudo systemctl enable DuckClaw-Homeostasis-TaskAsk.timer
+# Iniciar:   sudo systemctl start DuckClaw-Homeostasis-TaskAsk.timer
+# Ver estado: systemctl list-timers DuckClaw-Homeostasis-TaskAsk.timer
+#
+# OnCalendar ejemplos:
+#   *:00/2:00  = cada 2 horas (00:00, 02:00, 04:00, ...)
+#   *:30       = cada día a las 00:30
+#   Mon..Fri *:00/4:00 = cada 4 horas en días laborables
+
+[Unit]
+Description=Timer: DuckClaw homeostasis ask task (esporádico)
+
+[Timer]
+OnCalendar=*-*-* *:00/2:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

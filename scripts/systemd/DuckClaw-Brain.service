@@ -1,0 +1,20 @@
+# DuckClaw-Brain — bot de Telegram (LangGraph + memoria bicameral)
+# Copiar a: sudo cp scripts/systemd/DuckClaw-Brain.service /etc/systemd/system/
+# Habilitar: sudo systemctl enable DuckClaw-Brain
+# Iniciar:   sudo systemctl start DuckClaw-Brain
+# Logs:      sudo journalctl -u DuckClaw-Brain -f
+
+[Unit]
+Description=DuckClaw service: DuckClaw-Brain
+After=network.target
+
+[Service]
+Type=simple
+User=capadonna
+WorkingDirectory=/home/capadonna/duckclaw
+ExecStart=/home/capadonna/duckclaw/.venv/bin/python -m duckclaw.agents.telegram_bot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
