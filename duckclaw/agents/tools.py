@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
-# Solo lectura para run_sql cuando no es escritura
-_READ_ONLY = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE)\s", re.IGNORECASE)
-# Operaciones destructivas o de acceso al sistema de archivos — siempre bloqueadas
-_BLOCKED = re.compile(
-    r"\b(DROP|TRUNCATE|ATTACH|DETACH|COPY|EXPORT|IMPORT)\b",
-    re.IGNORECASE,
-)
-# ALTER solo se bloquea si modifica estructura de tabla existente (no CREATE)
-_ALTER_BLOCKED = re.compile(r"^\s*ALTER\s", re.IGNORECASE)
-
 _MEMORY_TABLE = "agent_memory"
+
+# SQLValidator for run_sql (SecurityGateway)
+_sql_validator: Any = None
+
+
+def _get_sql_validator() -> Any:
+    """Lazy init SQLValidator for run_sql."""
+    global _sql_validator
+    if _sql_validator is None:
+        try:
+            from duckclaw.security import SQLValidator
+
+            _sql_validator = SQLValidator(read_only=False)
+        except ImportError:
+            _sql_validator = False  # sqlglot not installed
+    return _sql_validator
 
 
 def _ensure_memory_table(db: Any) -> None:
@@ -32,18 +37,26 @@ def _ensure_memory_table(db: Any) -> None:
 
 
 def run_sql(db: Any, query: str) -> str:
-    """Ejecuta SQL. SELECT/WITH/SHOW/DESCRIBE devuelve filas; INSERT/UPDATE/CREATE/etc. devuelve {\"status\":\"ok\"}."""
+    """Ejecuta SQL. SELECT/WITH/SHOW/DESCRIBE devuelve filas; INSERT/UPDATE devuelve {\"status\":\"ok\"}."""
     if not query or not query.strip():
         return json.dumps({"error": "Query vacío."})
     q = query.strip()
-    if _BLOCKED.search(q):
-        blocked = re.search(r"\b(DROP|TRUNCATE|ATTACH|DETACH|COPY|EXPORT|IMPORT)\b", q, re.IGNORECASE)
-        cmd = blocked.group(0).upper() if blocked else "comando"
-        return json.dumps({"error": f"{cmd} no está permitido por política de seguridad."})
-    if _ALTER_BLOCKED.search(q):
-        return json.dumps({"error": "ALTER no está permitido. Usa CREATE TABLE IF NOT EXISTS para crear tablas nuevas."})
+    validator = _get_sql_validator()
+    if validator:
+        ok, err = validator.validate(q)
+        if not ok:
+            return json.dumps({"error": err})
+    else:
+        # Fallback when sqlglot not installed
+        import re
+
+        blocked = re.compile(
+            r"\b(DROP|TRUNCATE|ATTACH|DETACH|COPY|EXPORT|IMPORT|ALTER)\b", re.IGNORECASE
+        )
+        if blocked.search(q):
+            return json.dumps({"error": "Comando no permitido por política de seguridad."})
     try:
-        if _READ_ONLY.search(q):
+        if q.upper().startswith(("SELECT", "WITH", "SHOW", "DESCRIBE")):
             raw = db.query(q)
             # Cuando hay muchas filas, serializar como markdown compacto para el LLM
             # (spec Pipeline_de_Datos_Zero-Copy_con_PyArrow.md — LLMContextSerializer)

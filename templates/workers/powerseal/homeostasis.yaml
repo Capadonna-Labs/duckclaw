@@ -1,0 +1,11 @@
+# PowerSealWorker — homeostasis proactivo
+# Si el cliente pregunta por X y no hay stock, ofrecer Y (alternativa)
+homeostasis:
+  beliefs:
+    - key: "disponibilidad_minima"
+      target: 1.0
+      threshold: 0.2
+  actions:
+    - trigger: "disponibilidad_minima_drop"
+      skill: "search_products"
+      message: "Producto sin stock. Buscando alternativas en el catálogo."

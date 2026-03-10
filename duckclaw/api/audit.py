@@ -2,47 +2,50 @@
 
 from __future__ import annotations
 
-import json
 import os
-import re
 import time
 from typing import Any, Optional
 
-# Patrones para anonimización (Habeas Data)
-_CARD_PATTERN = re.compile(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b")
-_EMAIL_PATTERN = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
+_datamasker: Any = None
 
 
-def mask_sensitive_data(text: str) -> str:
-    """
-    Anonimiza tarjetas de crédito y emails antes de persistir en logs.
-    Habeas Data: evita que datos sensibles lleguen a LangSmith.
-    """
-    if not text or not isinstance(text, str):
-        return text
-    out = _CARD_PATTERN.sub("[REDACTED]", text)
-    out = _EMAIL_PATTERN.sub("[REDACTED]", out)
-    return out
+def _get_datamasker() -> Any:
+    """Lazy init DataMasker for PII anonymization."""
+    global _datamasker
+    if _datamasker is None:
+        try:
+            from duckclaw.forge.sft.datamasker import DataMasker
+
+            _datamasker = DataMasker()
+        except ImportError:
+            _datamasker = False
+    return _datamasker
 
 
 def _mask_dict(obj: Any) -> Any:
     """Recursivamente enmascara campos message y payload en dicts."""
-    if obj is None:
-        return None
-    if isinstance(obj, str):
-        return mask_sensitive_data(obj)
-    if isinstance(obj, dict):
-        result = {}
-        for k, v in obj.items():
-            key_lower = (k or "").lower()
-            if key_lower in ("message", "payload", "content", "text"):
-                result[k] = mask_sensitive_data(str(v)) if v is not None else v
-            else:
-                result[k] = _mask_dict(v)
-        return result
-    if isinstance(obj, list):
-        return [_mask_dict(x) for x in obj]
-    return obj
+    masker = _get_datamasker()
+    mask_fn = masker.mask if masker else (lambda x: x)
+
+    def _mask(val: Any) -> Any:
+        if val is None:
+            return None
+        if isinstance(val, str):
+            return mask_fn(val)
+        if isinstance(val, dict):
+            result = {}
+            for k, v in val.items():
+                key_lower = (k or "").lower()
+                if key_lower in ("message", "payload", "content", "text"):
+                    result[k] = mask_fn(str(v)) if v is not None else v
+                else:
+                    result[k] = _mask(v)
+            return result
+        if isinstance(val, list):
+            return [_mask(x) for x in val]
+        return val
+
+    return _mask(obj)
 
 
 async def audit_middleware(request: Any, call_next: Any):

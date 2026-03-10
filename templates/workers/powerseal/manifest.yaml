@@ -1,0 +1,13 @@
+# PowerSealWorker — Soporte al cliente con catálogo desde web
+# Spec: DuckClaw Production Readiness (Corto Plazo)
+name: PowerSealWorker
+id: powerseal
+schema_name: powerseal_worker
+topology: general
+read_only: true
+llm:
+  required: true
+  temperature: 0.3
+skills:
+  - fetch_product_catalog
+  - search_products

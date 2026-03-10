@@ -59,6 +59,32 @@ El VPS debe tener:
 
 Si la estructura actual usa `~/n8n`, configurar `VPS_DEPLOY_PATH` en los secretos con la ruta correcta.
 
+## systemd (n8n y Postgres)
+
+Si n8n o Postgres se ejecutan como servicios (no Docker), usar los unit files:
+
+```bash
+sudo cp scripts/systemd/n8n.service /etc/systemd/system/
+sudo cp scripts/systemd/postgres.service /etc/systemd/system/  # opcional, postgres suele venir con el paquete
+sudo systemctl daemon-reload
+sudo systemctl enable n8n
+sudo systemctl start n8n
+```
+
+Ajustar `User`, `WorkingDirectory` y `ExecStart` en `n8n.service` según la instalación.
+
+## Validación Tailscale (n8n -> DuckClaw)
+
+Desde el VPS, validar que n8n puede alcanzar la Mac Mini vía Tailscale:
+
+```bash
+# IP Tailscale de la Mac Mini (tailscale ip -4 en la Mac)
+export DUCKCLAW_TAILSCALE_IP=100.x.y.z
+bash scripts/validate_n8n_tailscale.sh
+```
+
+Flujo: n8n (VPS) → webhook HTTP → DuckClaw API (Mac Mini) vía IP Tailscale. El tráfico permanece cifrado E2EE en el túnel.
+
 ## Health Check y Rollback
 
 En el Mac Mini, tras `pm2 reload`, el workflow hace un health check contra:
