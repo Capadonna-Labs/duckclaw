@@ -55,3 +55,15 @@ def test_agent_history_requires_session(client: TestClient) -> None:
     data = r.json()
     assert "history" in data
     assert data.get("worker_id") == "finanz"
+
+
+def test_forget_command_via_api_succeeds(client: TestClient) -> None:
+    """POST /forget with session_id='default' succeeds (fix for API gateway bug)."""
+    r = client.post(
+        "/api/v1/agent/finanz/chat",
+        json={"message": "/forget", "session_id": "default", "stream": False},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert "response" in data
+    assert "✅" in data["response"] or "Historial borrado" in data["response"]

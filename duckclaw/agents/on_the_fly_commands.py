@@ -16,7 +16,12 @@ _PREFIX = "chat_"
 
 
 def _chat_key(chat_id: Any, suffix: str) -> str:
-    return f"{_PREFIX}{int(chat_id)}_{suffix}"
+    """Key for agent_config; supports numeric (Telegram) and string (API session_id)."""
+    try:
+        cid = int(chat_id)
+        return f"{_PREFIX}{cid}_{suffix}"
+    except (TypeError, ValueError):
+        return f"{_PREFIX}{str(chat_id)[:64]}_{suffix}"
 
 
 _AGENT_CONFIG_TABLE = "agent_config"
@@ -113,18 +118,27 @@ def execute_forget(db: Any, chat_id: Any) -> str:
     """/forget: borra historial de la conversación y reinicia estado."""
     try:
         cid = int(chat_id)
+        # Telegram: chat_id is numeric, use telegram_conversation
         db.execute(f"DELETE FROM telegram_conversation WHERE chat_id = {cid}")
+    except (TypeError, ValueError):
+        # API gateway: session_id is string (e.g. "default"), use api_conversation
+        sid = str(chat_id).replace("'", "''")[:256]
+        try:
+            db.execute(f"DELETE FROM api_conversation WHERE session_id = '{sid}'")
+        except Exception:
+            pass  # Table may not exist if only Telegram used
+    try:
         set_chat_state(db, chat_id, "last_audit", "")
-        if os.environ.get("LANGCHAIN_TRACING_V2", "").lower() == "true":
-            try:
-                import langsmith
-                # Log evento Habeas Data (opcional: run_id no disponible aquí)
-                pass
-            except Exception:
-                pass
-        return "✅ Historial borrado. Contexto reiniciado (Habeas Data: supresión solicitada por el usuario)."
-    except Exception as e:
-        return f"Error: {e}."
+    except Exception:
+        pass
+    if os.environ.get("LANGCHAIN_TRACING_V2", "").lower() == "true":
+        try:
+            import langsmith
+            # Log evento Habeas Data (opcional: run_id no disponible aquí)
+            pass
+        except Exception:
+            pass
+    return "✅ Historial borrado. Contexto reiniciado (Habeas Data: supresión solicitada por el usuario)."
 
 
 def execute_context_toggle(db: Any, chat_id: Any, on_off: str) -> str:
