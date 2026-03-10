@@ -5,26 +5,33 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
-# Blocklist for read SQL: no DDL or write operations
-_READ_BLOCKED = re.compile(
-    r"\b(DROP|ALTER|TRUNCATE|CREATE|INSERT|UPDATE|DELETE|ATTACH|COPY|EXPORT|IMPORT|PRAGMA\s+table_info)\b",
-    re.IGNORECASE,
-)
-# Blocklist for write SQL: only allow INSERT/UPDATE/DELETE; block DDL and other writes
-_WRITE_BLOCKED = re.compile(
-    r"\b(DROP|ALTER|TRUNCATE|CREATE|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA)\b",
-    re.IGNORECASE,
-)
-# Allowed write statement starters (safe_write policy)
-_WRITE_ALLOWED = re.compile(
-    r"^\s*(INSERT|UPDATE|DELETE)\s+",
-    re.IGNORECASE,
-)
-# Allowed read statement starters
-_READ_ALLOWED = re.compile(
-    r"^\s*(SELECT|WITH|SHOW|DESCRIBE)\s",
-    re.IGNORECASE,
-)
+# SQLValidator for SecurityGateway (sqlglot-based)
+_read_validator: Any = None
+_write_validator: Any = None
+
+
+def _get_read_validator() -> Any:
+    global _read_validator
+    if _read_validator is None:
+        try:
+            from duckclaw.security import SQLValidator
+
+            _read_validator = SQLValidator(read_only=True)
+        except ImportError:
+            _read_validator = False
+    return _read_validator
+
+
+def _get_write_validator() -> Any:
+    global _write_validator
+    if _write_validator is None:
+        try:
+            from duckclaw.security import SQLValidator
+
+            _write_validator = SQLValidator(write_only=True)
+        except ImportError:
+            _write_validator = False
+    return _write_validator
 
 
 def _safe_table_name(name: str) -> str | None:
@@ -39,24 +46,30 @@ def _safe_table_name(name: str) -> str | None:
 
 def _validate_read_sql(sql: str) -> tuple[bool, str]:
     """Return (True, '') if SQL is allowed for read, else (False, error_message)."""
+    v = _get_read_validator()
+    if v:
+        return v.validate(sql)
     s = (sql or "").strip()
     if not s:
         return False, "SQL vacío."
-    if _READ_BLOCKED.search(s):
-        return False, "Solo se permiten consultas de lectura (SELECT, WITH, SHOW, DESCRIBE). No uses DROP, ALTER, INSERT, etc."
-    if not _READ_ALLOWED.search(s):
+    if re.search(r"\b(DROP|ALTER|INSERT|UPDATE|DELETE|CREATE|ATTACH|COPY|EXPORT|IMPORT)\b", s, re.I):
+        return False, "Solo se permiten consultas de lectura (SELECT, WITH, SHOW, DESCRIBE)."
+    if not re.search(r"^\s*(SELECT|WITH|SHOW|DESCRIBE)\s", s, re.I):
         return False, "La consulta debe empezar por SELECT, WITH, SHOW o DESCRIBE."
     return True, ""
 
 
 def _validate_write_sql(sql: str) -> tuple[bool, str]:
     """Return (True, '') if SQL is allowed for safe_write, else (False, error_message)."""
+    v = _get_write_validator()
+    if v:
+        return v.validate(sql)
     s = (sql or "").strip()
     if not s:
         return False, "SQL vacío."
-    if _WRITE_BLOCKED.search(s):
-        return False, "No se permiten DROP, ALTER, TRUNCATE, CREATE, ATTACH, COPY, etc. Solo INSERT, UPDATE, DELETE."
-    if not _WRITE_ALLOWED.search(s):
+    if re.search(r"\b(DROP|ALTER|TRUNCATE|CREATE|ATTACH|DETACH|COPY|EXPORT|IMPORT|PRAGMA)\b", s, re.I):
+        return False, "No se permiten DROP, ALTER, CREATE, etc. Solo INSERT, UPDATE, DELETE."
+    if not re.search(r"^\s*(INSERT|UPDATE|DELETE)\s", s, re.I):
         return False, "La sentencia debe ser INSERT, UPDATE o DELETE."
     return True, ""
 

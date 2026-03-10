@@ -1,0 +1,22 @@
+# PostgreSQL — base de datos para n8n y colas
+# Nota: En la mayoría de instalaciones, PostgreSQL ya viene con su unit.
+# Este archivo es referencia. Si usas el paquete postgresql de Ubuntu:
+#   sudo apt install postgresql
+#   sudo systemctl enable postgresql
+#   sudo systemctl start postgresql
+#
+# Si despliegas Postgres en Docker, usa docker-compose en su lugar.
+
+[Unit]
+Description=PostgreSQL database
+After=network.target
+
+[Service]
+Type=notify
+User=postgres
+ExecStart=/usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

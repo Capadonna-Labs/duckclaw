@@ -2,11 +2,15 @@
 SFT_DataCollector — transforma trazas con reward 1.0 en dataset SFT (ChatML).
 
 Spec: specs/Migracion_de_Pipeline_de_Entrenamiento_(GRPO_a_SFT_con_MLX).md
+Spec: DuckClaw Production Readiness — extracción desde LangSmith.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -124,3 +128,121 @@ def collect_traces_to_sft(
         "skipped_reward": skipped_reward,
     }
     return records, stats
+
+
+def collect_from_langsmith(
+    project_name: Optional[str] = None,
+    output_path: Optional[Path | str] = None,
+    *,
+    start_time: Optional[datetime] = None,
+    limit: int = 500,
+    min_reward: float = 1.0,
+    system_prompt: Optional[str] = None,
+    datamasker: Optional[DataMasker] = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Extrae trazas exitosas de LangSmith y las convierte a dataset SFT.
+
+    - project_name: Proyecto LangSmith (default: LANGSMITH_PROJECT o LANGCHAIN_PROJECT).
+    - output_path: Salida JSONL (default: train/dataset_sft.jsonl).
+    - start_time: Desde cuándo extraer (default: últimas 24h).
+    - limit: Máximo de runs a procesar.
+    - min_reward: Solo runs sin error (reward=1.0 si success).
+    """
+    try:
+        from langsmith import Client
+    except ImportError:
+        return [], {
+            "error": "langsmith no instalado. pip install langsmith",
+            "total_output": 0,
+            "skipped_sql": 0,
+            "skipped_reward": 0,
+        }
+
+    project = project_name or os.environ.get("LANGSMITH_PROJECT") or os.environ.get("LANGCHAIN_PROJECT", "")
+    if not project:
+        return [], {
+            "error": "LANGSMITH_PROJECT o project_name requerido",
+            "total_output": 0,
+            "skipped_sql": 0,
+            "skipped_reward": 0,
+        }
+
+    since = start_time or (datetime.now(timezone.utc) - timedelta(days=1))
+    out = Path(output_path) if output_path else DEFAULT_SFT_DATASET_PATH
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    client = Client()
+    groups: dict[str, dict[str, Any]] = {}
+
+    try:
+        runs = client.list_runs(
+            project_name=project,
+            start_time=since,
+            limit=limit,
+            is_root=True,
+            error=False,
+        )
+        for run in runs:
+            inputs = run.inputs or {}
+            outputs = run.outputs or {}
+            prompt = ""
+            if isinstance(inputs, dict):
+                for k in ("messages", "incoming", "message", "input", "prompt"):
+                    if k in inputs:
+                        v = inputs[k]
+                        if isinstance(v, str):
+                            prompt = v
+                            break
+                        if isinstance(v, list) and v:
+                            msg = v[-1] if isinstance(v[-1], dict) else v[-1]
+                            prompt = str(msg.get("content", msg) if isinstance(msg, dict) else msg)
+                            break
+            if not prompt:
+                prompt = str(inputs)[:2000]
+
+            completion = ""
+            if isinstance(outputs, dict):
+                for k in ("output", "reply", "content", "content", "result"):
+                    if k in outputs:
+                        completion = str(outputs[k])
+                        break
+            if not completion:
+                completion = str(outputs)[:2000]
+
+            if not prompt.strip() or not completion.strip():
+                continue
+
+            key = prompt[:100]
+            if key not in groups:
+                groups[key] = {"prompt": prompt, "completions": []}
+            groups[key]["completions"].append({"text": completion, "reward": 1.0})
+    except Exception as e:
+        return [], {
+            "error": str(e),
+            "total_output": 0,
+            "skipped_sql": 0,
+            "skipped_reward": 0,
+        }
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        for g in groups.values():
+            f.write(json.dumps(g, ensure_ascii=False) + "\n")
+        tmp_path = f.name
+
+    try:
+        records, stats = collect_traces_to_sft(
+            input_path=tmp_path,
+            output_path=out,
+            system_prompt=system_prompt,
+            min_reward=min_reward,
+            datamasker=datamasker,
+        )
+        stats["source"] = "langsmith"
+        stats["project"] = project
+        return records, stats
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass

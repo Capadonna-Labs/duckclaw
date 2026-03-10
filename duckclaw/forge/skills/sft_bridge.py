@@ -12,18 +12,27 @@ from typing import Any, Optional
 def _collect_sft_dataset_impl(
     input_path: Optional[str] = None,
     output_path: Optional[str] = None,
+    source: str = "local",
 ) -> str:
-    """Genera dataset SFT desde trazas con reward 1.0."""
-    from duckclaw.forge.sft import collect_traces_to_sft
+    """Genera dataset SFT desde trazas. source: local (JSONL) o langsmith."""
+    if (source or "local").strip().lower() == "langsmith":
+        from duckclaw.forge.sft.collector import collect_from_langsmith
 
-    records, stats = collect_traces_to_sft(
-        input_path=input_path,
-        output_path=output_path,
-    )
+        records, stats = collect_from_langsmith(output_path=output_path)
+    else:
+        from duckclaw.forge.sft import collect_traces_to_sft
+
+        records, stats = collect_traces_to_sft(
+            input_path=input_path,
+            output_path=output_path,
+        )
+    err = stats.get("error", "")
+    if err:
+        return f"Error: {err}"
     return (
         f"Generado {stats['total_output']} ejemplos en {stats['output_path']}. "
-        f"Omitidos: {stats['skipped_sql']} por SQL inválido, "
-        f"{stats['skipped_reward']} por reward bajo."
+        f"Omitidos: {stats.get('skipped_sql', 0)} por SQL inválido, "
+        f"{stats.get('skipped_reward', 0)} por reward bajo."
     )
 
 
@@ -41,7 +50,7 @@ def _collect_sft_dataset_tool(config: Optional[dict] = None) -> Optional[Any]:
     return StructuredTool.from_function(
         _collect_sft_dataset_impl,
         name="collect_sft_dataset",
-        description="Genera dataset SFT desde trazas con reward 1.0. Aplica DataMasker (anonimiza PII) y valida SQL con sqlglot. Argumentos opcionales: input_path, output_path.",
+        description="Genera dataset SFT desde trazas. source=local (default) usa input_path JSONL; source=langsmith extrae de LangSmith (LANGSMITH_PROJECT). Aplica DataMasker y valida SQL.",
     )
 
 

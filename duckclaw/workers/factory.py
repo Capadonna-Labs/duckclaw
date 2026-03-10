@@ -9,11 +9,36 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
 
 from duckclaw.workers.manifest import WorkerSpec, load_manifest, get_worker_dir
 from duckclaw.workers.loader import load_system_prompt, load_skills, run_schema
+
+# Patrones que indican ausencia de tarea concreta (saludos genéricos)
+_NO_TASK_PATTERN = re.compile(
+    r"^(hola|hi|hey|buenos?\s*d[ií]as?|buenas?\s*tardes?|buenas?\s*noches?|"
+    r"qu[eé]\s*tal|qu[eé]\s*hay|saludos?|hello|ciao|adios?|chao)\s*[!.]?$",
+    re.IGNORECASE,
+)
+
+
+def _is_no_task(incoming: str) -> bool:
+    """True si el mensaje está vacío o es solo un saludo genérico (sin tarea concreta)."""
+    text = (incoming or "").strip()
+    if not text:
+        return True
+    if len(text) < 4:
+        return True
+    return bool(_NO_TASK_PATTERN.match(text))
+
+
+_TASK_AWARENESS_PROMPT = """
+Además:
+- Si no recibes una tarea concreta (mensaje vacío o solo saludos), pregunta: "¿Cuál es mi tarea?" y ofrece ejemplos de lo que puedes hacer según tu rol.
+- Mientras resuelves una tarea, al final sugiere 1-3 tareas similares que podrías hacer a continuación.
+"""
 
 
 def _get_db_path(worker_id: str, instance_name: Optional[str], base_path: Optional[str]) -> str:
@@ -35,28 +60,23 @@ def _build_worker_tools(db: Any, spec: WorkerSpec) -> list:
     """Build tool list: template skills + optional run_sql with allow-list."""
     from langchain_core.tools import StructuredTool
 
+    from duckclaw.security import SQLValidator
+
     tools = load_skills(spec, db)
     schema = spec.schema_name
+    validator = SQLValidator(
+        read_only=spec.read_only,
+        allowed_tables=spec.allowed_tables or None,
+        schema_name=schema,
+    )
 
     def _run_sql_worker(query: str) -> str:
         if not query or not query.strip():
             return json.dumps({"error": "Query vacío."})
         q = query.strip()
-        if spec.read_only:
-            if any(kw in q.upper() for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER")):
-                return json.dumps({"error": "Este trabajador es solo lectura. No se permiten escrituras."})
-        if spec.allowed_tables:
-            # Allow-list: only these tables (optionally schema-qualified)
-            upper = q.upper()
-            for t in spec.allowed_tables:
-                if t.upper() in upper or f"{schema}.{t}".upper() in upper:
-                    break
-            else:
-                # No allowed table mentioned; check if query touches any table
-                if "FROM" in upper or "INTO" in upper or "UPDATE" in upper or "JOIN" in upper:
-                    return json.dumps({
-                        "error": f"Solo se permiten las tablas: {', '.join(spec.allowed_tables)}."
-                    })
+        ok, err = validator.validate(q)
+        if not ok:
+            return json.dumps({"error": err})
         try:
             if q.upper().startswith(("SELECT", "WITH", "SHOW", "DESCRIBE")):
                 return db.query(q)
@@ -184,8 +204,11 @@ def build_worker_graph(
     from langgraph.graph import END, StateGraph
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
+    has_homeostasis = bool(getattr(spec, "homeostasis_config", None))
+    effective_prompt = (system_prompt or "").strip() + "\n\n" + _TASK_AWARENESS_PROMPT.strip()
+
     def prepare_node(state: dict) -> dict:
-        messages = [SystemMessage(content=system_prompt)]
+        messages = [SystemMessage(content=effective_prompt)]
         for h in (state.get("history") or []):
             role = (h.get("role") or "").lower()
             content = h.get("content") or ""
@@ -193,7 +216,16 @@ def build_worker_graph(
                 messages.append(HumanMessage(content=content))
             elif role == "assistant":
                 messages.append(AIMessage(content=content))
-        messages.append(HumanMessage(content=state.get("incoming") or ""))
+        incoming = state.get("incoming") or ""
+        needs_task = state.get("homeostasis_hint") == "ask_task" or _is_no_task(incoming)
+        if needs_task:
+            user_content = (
+                f"[El usuario dijo: '{incoming.strip() or '(vacío)'}'. No ha indicado una tarea concreta. "
+                "Pregúntale: ¿Cuál es mi tarea? Y ofrece ejemplos de lo que puedes hacer según tu rol.]"
+            )
+        else:
+            user_content = incoming
+        messages.append(HumanMessage(content=user_content))
         return {"messages": messages}
 
     if llm is None:
@@ -252,7 +284,11 @@ def build_worker_graph(
         return "tools" if getattr(last, "tool_calls", None) else "end"
 
     def homeostasis_node(state: dict) -> dict:
-        """HomeostasisNode: Percepción-Sorpresa-Restauración-Actualización. Fase 1: pass-through (tabla ya creada en run_schema)."""
+        """HomeostasisNode: Percepción-Sorpresa-Restauración-Actualización.
+        Detecta ausencia de tarea (incoming vacío o saludo genérico) y señala ask_task."""
+        incoming = state.get("incoming") or ""
+        if _is_no_task(incoming):
+            return {"homeostasis_hint": "ask_task"}
         return {}
 
     graph = StateGraph(dict)

@@ -38,6 +38,7 @@ agents = [
     "openpyxl>=3.1.0",
     "matplotlib>=3.7.0",
     "pyyaml>=6.0",
+    "sqlglot>=20.0.0",
 ]
 groq = [
     "langchain-groq>=0.2.0",
@@ -63,6 +64,13 @@ serve = [
     "uvicorn[standard]>=0.39.0",
     "PyJWT>=2.0.0",
     "slowapi>=0.1.9",
+    "sqlglot>=20.0.0",
+]
+
+# queue: Redis + ARQ para ActivityManager (orquestación)
+queue = [
+    "redis>=5.0.0",
+    "arq>=0.25.0",
 ]
 
 sandbox = [
@@ -84,6 +92,12 @@ github = [
 # tavily: búsqueda web en tiempo real. Requiere TAVILY_API_KEY
 tavily = [
     "tavily-python>=0.5.0",
+]
+
+# web: requests + beautifulsoup4 para fetch_product_catalog (Power Seal)
+web = [
+    "requests>=2.28.0",
+    "beautifulsoup4>=4.12.0",
 ]
 
 # browser: navegación autónoma con Playwright. Requiere Python>=3.11. Phase 2: Strix Sandbox

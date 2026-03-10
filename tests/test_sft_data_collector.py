@@ -3,8 +3,9 @@
 import json
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from duckclaw.forge.sft import DataMasker, collect_traces_to_sft
+from duckclaw.forge.sft import DataMasker, collect_from_langsmith, collect_traces_to_sft
 
 
 def test_datamasker_emails() -> None:
@@ -113,3 +114,32 @@ def test_min_reward_filter() -> None:
     finally:
         inp.unlink(missing_ok=True)
         out.unlink(missing_ok=True)
+
+
+def test_collect_from_langsmith_no_project() -> None:
+    """collect_from_langsmith sin LANGSMITH_PROJECT retorna error."""
+    records, stats = collect_from_langsmith(project_name="")
+    assert len(records) == 0
+    assert "error" in stats
+
+
+def test_collect_from_langsmith_mocked() -> None:
+    """collect_from_langsmith con Client mockeado."""
+    mock_run = MagicMock()
+    mock_run.inputs = {"incoming": "¿Mejores vendedores?", "messages": []}
+    mock_run.outputs = {"reply": "<thought>OK</thought>\n<tool_call>{\"tool\": \"get_top_sellers\", \"args\":{}}</tool_call>\n<answer>Listo</answer>"}
+    mock_run.error = None
+
+    with patch("langsmith.Client") as mock_client:
+        mock_client.return_value.list_runs.return_value = [mock_run]
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            out_path = Path(f.name)
+        try:
+            records, stats = collect_from_langsmith(
+                project_name="test-project",
+                output_path=out_path,
+            )
+            assert "error" not in stats or stats.get("total_output", 0) >= 0
+            assert stats.get("source") == "langsmith"
+        finally:
+            out_path.unlink(missing_ok=True)

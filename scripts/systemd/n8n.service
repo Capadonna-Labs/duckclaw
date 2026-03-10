@@ -1,0 +1,24 @@
+# n8n — orquestador de flujos (DuckClaw VPS)
+# Copiar a: sudo cp scripts/systemd/n8n.service /etc/systemd/system/
+# Habilitar: sudo systemctl enable n8n
+# Iniciar:   sudo systemctl start n8n
+#
+# Requisitos: n8n instalado (npm install -g n8n) o en /opt/duckclaw-vps
+# Si usas Docker, este archivo es opcional (docker compose gestiona el servicio).
+
+[Unit]
+Description=n8n workflow automation
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=n8n
+WorkingDirectory=/opt/n8n
+ExecStart=/usr/bin/n8n start
+Restart=on-failure
+RestartSec=10
+Environment=NODE_ENV=production
+Environment=WEBHOOK_URL=https://your-domain.com/
+
+[Install]
+WantedBy=multi-user.target
