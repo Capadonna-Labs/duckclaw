@@ -18,6 +18,9 @@ from duckclaw.utils.config import load_dotenv
 
 load_dotenv()
 
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+
 try:
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
@@ -29,7 +32,15 @@ except ImportError as exc:
 from duckclaw.api.auth import auth_middleware
 from duckclaw.api.audit import audit_middleware
 from duckclaw.api.rate_limit import rate_limit_middleware
-from duckclaw.api.routers import agents, homeostasis, system
+from duckclaw.api.routers import agents, activity, homeostasis, system
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    from duckclaw.api.activity import get_activity_manager
+    get_activity_manager().ensure_zombie_watcher()
+    yield
+
 
 app = FastAPI(
     title="DuckClaw API Gateway",
@@ -37,6 +48,7 @@ app = FastAPI(
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=_lifespan,
 )
 
 # CORS
@@ -60,6 +72,7 @@ app.middleware("http")(auth_middleware)
 
 # Routers
 app.include_router(agents.router)
+app.include_router(activity.router)
 app.include_router(homeostasis.router)
 app.include_router(system.router)
 
@@ -72,6 +85,9 @@ async def root():
         "endpoints": [
             "/api/v1/agent/{worker_id}/chat",
             "/api/v1/agent/{worker_id}/history",
+            "/api/v1/agents/status",
+            "/api/v1/agents/activity-stream",
+            "/api/v1/agents/{worker_id}/heartbeat",
             "/api/v1/homeostasis/status",
             "/api/v1/homeostasis/{worker_id}/action",
             "/api/v1/system/health",

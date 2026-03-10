@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse as _JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from duckclaw.utils.sql_safe import escape_value, is_safe_identifier
@@ -191,14 +191,39 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
     """
     Envía un mensaje al agente. Retorna StreamingResponse (SSE) token por token o JSON.
     Persiste en api_conversation para historial.
+
+    Si el agente está BUSY, responde con status 202 y un mensaje informativo
+    para que el frontend/canal pueda mostrar feedback al usuario.
     """
+    from duckclaw.api.activity import get_activity_manager
+
     if not is_safe_identifier(worker_id):
         raise HTTPException(status_code=400, detail="worker_id contiene caracteres inválidos")
+
+    mgr = get_activity_manager()
+
+    if mgr.is_busy(worker_id):
+        state = mgr.get_status(worker_id)
+        return _JSONResponse(
+            status_code=202,
+            content={
+                "status": "BUSY",
+                "worker_id": worker_id,
+                "task": state.task_description,
+                "since": state.since,
+                "message": (
+                    f"El agente {worker_id} está procesando una solicitud. "
+                    "¿Quieres que te avise cuando termine o prefieres consultar otra cosa?"
+                ),
+            },
+        )
+
     try:
         graph = _get_or_build_worker_graph(worker_id)
     except HTTPException:
         raise
     except Exception as exc:
+        mgr.mark_error(worker_id, detail=str(exc))
         raise HTTPException(status_code=503, detail=f"Error inicializando worker: {exc}")
 
     db = _get_db()
@@ -206,26 +231,28 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
     history = payload.history or _get_history(db, session_id, worker_id, limit=6)
 
     if not payload.stream:
-        # Modo JSON directo para n8n / webhooks
         try:
-            # Procesar comandos on-the-fly primero
             from duckclaw.agents.on_the_fly_commands import handle_command
             cmd_reply = handle_command(db, session_id, payload.message)
             if cmd_reply:
                 return {"response": cmd_reply, "session_id": session_id}
 
-            extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
-            reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
-            reply = _sanitize_for_telegram(reply)
-            _persist_turn(db, session_id, worker_id, "user", payload.message)
-            _persist_turn(db, session_id, worker_id, "assistant", reply)
-            return {"response": reply, "session_id": session_id}
+            mgr.mark_busy(worker_id, task_description=payload.message[:120])
+            try:
+                extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
+                reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
+                reply = _sanitize_for_telegram(reply)
+                _persist_turn(db, session_id, worker_id, "user", payload.message)
+                _persist_turn(db, session_id, worker_id, "assistant", reply)
+                return {"response": reply, "session_id": session_id}
+            finally:
+                mgr.mark_idle(worker_id)
         except Exception as exc:
+            mgr.mark_error(worker_id, detail=str(exc))
             raise HTTPException(status_code=500, detail=str(exc))
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            # Procesar comandos on-the-fly primero
             from duckclaw.agents.on_the_fly_commands import handle_command
             cmd_reply = handle_command(db, session_id, payload.message)
             if cmd_reply:
@@ -235,16 +262,21 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
                 yield "data: [DONE]\n\n"
                 return
 
-            extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
-            reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
-            reply = _sanitize_for_telegram(reply)
-            _persist_turn(db, session_id, worker_id, "user", payload.message)
-            _persist_turn(db, session_id, worker_id, "assistant", reply)
-            for word in reply.split(" "):
-                yield f"data: {word} \n\n"
-                await asyncio.sleep(0.02)
-            yield "data: [DONE]\n\n"
+            mgr.mark_busy(worker_id, task_description=payload.message[:120])
+            try:
+                extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
+                reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
+                reply = _sanitize_for_telegram(reply)
+                _persist_turn(db, session_id, worker_id, "user", payload.message)
+                _persist_turn(db, session_id, worker_id, "assistant", reply)
+                for word in reply.split(" "):
+                    yield f"data: {word} \n\n"
+                    await asyncio.sleep(0.02)
+                yield "data: [DONE]\n\n"
+            finally:
+                mgr.mark_idle(worker_id)
         except Exception as exc:
+            mgr.mark_error(worker_id, detail=str(exc))
             yield f"data: [ERROR] {exc}\n\n"
 
     return StreamingResponse(
