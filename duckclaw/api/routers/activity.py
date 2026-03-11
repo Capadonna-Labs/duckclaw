@@ -13,10 +13,8 @@ router = APIRouter(prefix="/api/v1/activity", tags=["activity"])
 
 
 def _get_db_path() -> str:
-    p = os.environ.get("DUCKCLAW_DB_PATH", "").strip()
-    if p:
-        return str(Path(p).resolve())
-    return str(Path(__file__).resolve().parent.parent.parent.parent / "db" / "gateway.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    return get_gateway_db_path()
 
 
 def _get_db() -> Any:

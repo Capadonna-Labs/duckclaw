@@ -17,10 +17,8 @@ _WORKERS_DIR = _PROJECT_ROOT / "templates" / "workers"
 
 
 def _get_db_path() -> str:
-    p = os.environ.get("DUCKCLAW_DB_PATH", "").strip()
-    if p:
-        return str(Path(p).resolve())
-    return str(_PROJECT_ROOT / "db" / "gateway.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    return get_gateway_db_path()
 
 
 def _get_db() -> Any:

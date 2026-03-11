@@ -17,12 +17,13 @@ from duckclaw.workers.factory import list_workers
 
 @pytest.fixture
 def db():
-    """Real DuckDB for integration test (uses gateway.duckdb)."""
+    """Real DuckDB for integration test (same path as Gateway)."""
     from duckclaw import DuckClaw
+    from duckclaw.gateway_db import get_gateway_db_path
 
-    path = Path(__file__).resolve().parent.parent / "db" / "gateway.duckdb"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return DuckClaw(str(path))
+    path = get_gateway_db_path()
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    return DuckClaw(path)
 
 
 def test_role_switch_stores_worker_id(db) -> None:

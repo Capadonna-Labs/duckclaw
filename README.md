@@ -98,7 +98,7 @@ The wizard detects existing PM2 services, guides you through LLM provider select
 ```bash
 # Set env vars
 export TELEGRAM_BOT_TOKEN="your_token"
-export DUCKCLAW_DB_PATH="db/telegram.duckdb"
+export DUCKCLAW_DB_PATH="db/gateway.duckdb"   # optional; default is db/gateway.duckdb
 export DUCKCLAW_LLM_PROVIDER="mlx"           # openai | anthropic | deepseek | huggingface | mlx | ollama | none_llm
 export DUCKCLAW_LLM_BASE_URL="http://127.0.0.1:8080/v1"
 
@@ -276,8 +276,8 @@ All variables go in `.env` at the project root. They are loaded automatically by
 # Telegram
 TELEGRAM_BOT_TOKEN=...
 
-# Database
-DUCKCLAW_DB_PATH=/path/to/db/telegram.duckdb
+# Database (one .duckdb for Gateway: conversations + agent SQL)
+DUCKCLAW_DB_PATH=/path/to/db/gateway.duckdb   # optional; default is db/gateway.duckdb
 
 # LLM
 DUCKCLAW_LLM_PROVIDER=mlx

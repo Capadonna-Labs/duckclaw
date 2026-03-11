@@ -86,10 +86,8 @@ def _ensure_api_conversation_table(db: Any) -> None:
 
 def _get_db_path() -> str:
     """Ruta a la DB del gateway (api_conversation + workers)."""
-    p = os.environ.get("DUCKCLAW_DB_PATH", "").strip()
-    if p:
-        return str(Path(p).resolve())
-    return str(Path(__file__).resolve().parent.parent.parent.parent / "db" / "gateway.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    return get_gateway_db_path()
 
 
 def _get_llm_config_for_session(db: Any, session_id: str) -> tuple[str, str, str]:
@@ -127,20 +125,12 @@ def _get_or_build_worker_graph(worker_id: str, session_id: Optional[str] = None)
         except Exception as e:
             logging.getLogger(__name__).warning("build_llm failed for %s: %s", provider, e)
 
-    instance_name = None
-    try:
-        from duckclaw.workers.manifest import load_manifest
-        templates_root = WORKERS_TEMPLATES_DIR.parent.parent
-        spec = load_manifest(worker_id, templates_root)
-        instance_name = getattr(spec, "name", None) or worker_id
-    except Exception:
-        instance_name = worker_id
-
+    # instance_name=None para que todos los workers usen la misma .duckdb (gateway)
     graph = AgentAssembler.from_yaml(manifest_path).build(
         db=None,
         llm=llm,
         db_path=db_path,
-        instance_name=instance_name,
+        instance_name=None,
         llm_provider=provider if provider else None,
         llm_model=model if model else None,
         llm_base_url=base_url if base_url else None,

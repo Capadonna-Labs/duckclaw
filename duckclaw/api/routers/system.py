@@ -14,14 +14,10 @@ from fastapi.responses import StreamingResponse
 
 router = APIRouter(prefix="/api/v1/system", tags=["system"])
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-
 
 def _get_db_path() -> str:
-    p = os.environ.get("DUCKCLAW_DB_PATH", "").strip()
-    if p:
-        return str(Path(p).resolve())
-    return str(_PROJECT_ROOT / "db" / "gateway.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    return get_gateway_db_path()
 
 
 @router.get("/db-path", summary="Ruta de la base DuckDB en uso (debug)")

@@ -19,10 +19,8 @@ from pathlib import Path
 
 
 def _get_db_path() -> str:
-    p = os.environ.get("DUCKCLAW_DB_PATH", "").strip()
-    if p:
-        return str(Path(p).resolve())
-    return str(Path(__file__).resolve().parents[3] / "db" / "workers.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    return get_gateway_db_path()
 
 
 def load_csv(path: str) -> list[dict]:

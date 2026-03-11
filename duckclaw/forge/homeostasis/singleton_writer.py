@@ -94,7 +94,8 @@ def run_consumer(db_path: Optional[str] = None, poll_interval: float = 0.5) -> N
 
     path = db_path or os.environ.get(_DB_PATH_ENV, "")
     if not path:
-        path = str(Path(__file__).resolve().parents[4] / "db" / "gateway.duckdb")
+        from duckclaw.gateway_db import get_gateway_db_path
+        path = get_gateway_db_path()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     from duckclaw import DuckClaw

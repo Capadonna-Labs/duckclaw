@@ -75,7 +75,8 @@ async def run_chat_job(
         if not manifest_path.is_file():
             return json.dumps({"error": f"Worker '{worker_id}' no encontrado"})
 
-        db_path = os.environ.get("DUCKCLAW_DB_PATH") or str(Path.cwd() / "db" / "gateway.duckdb")
+        from duckclaw.gateway_db import get_gateway_db_path
+        db_path = get_gateway_db_path()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
         graph = AgentAssembler.from_yaml(manifest_path).build(
@@ -142,7 +143,8 @@ async def graph_lead_profiler_job(
     Job ARQ: extrae tripletas comerciales del chat y persiste en PGQ (Sovereign CRM).
     Spec: specs/Sovereign_CRM_Memoria_Bicameral_DuckDB_PGQ.md
     """
-    db_path = os.environ.get("DUCKCLAW_DB_PATH") or str(Path.cwd() / "db" / "gateway.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    db_path = get_gateway_db_path()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     try:
         from duckclaw import DuckClaw

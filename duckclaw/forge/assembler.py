@@ -176,9 +176,9 @@ class AgentAssembler:
         db_path = overrides.get("db_path")
         if db_path is None and db is not None:
             db_path = getattr(db, "_path", None) or getattr(db, "path", None)
-        if db_path is None:
-            import os
-            db_path = os.environ.get("DUCKCLAW_DB_PATH", "")
+        if db_path is None or (isinstance(db_path, str) and not db_path.strip()):
+            from duckclaw.gateway_db import get_gateway_db_path
+            db_path = get_gateway_db_path()
 
         troot = self._troot
         if troot is None:

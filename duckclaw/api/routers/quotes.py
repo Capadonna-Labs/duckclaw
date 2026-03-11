@@ -15,8 +15,8 @@ router = APIRouter(prefix="/api/v1/quotes", tags=["quotes"])
 
 def _get_db():
     from duckclaw import DuckClaw
-    p = os.environ.get("DUCKCLAW_DB_PATH", "").strip()
-    path = str(Path(p).resolve()) if p else str(Path(__file__).resolve().parent.parent.parent.parent / "db" / "gateway.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    path = get_gateway_db_path()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     return DuckClaw(path)
 

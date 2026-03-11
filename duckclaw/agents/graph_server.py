@@ -120,9 +120,8 @@ def _get_or_build_graph() -> Any:
     from duckclaw.integrations.llm_providers import build_llm
     from duckclaw.forge import AgentAssembler, ENTRY_ROUTER_YAML
 
-    db_path = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
-    if not db_path:
-        db_path = str(Path(__file__).resolve().parent.parent.parent / "db" / "telegram.duckdb")
+    from duckclaw.gateway_db import get_gateway_db_path
+    db_path = get_gateway_db_path()
 
     import os as _os
     _os.makedirs(str(Path(db_path).parent), exist_ok=True)
