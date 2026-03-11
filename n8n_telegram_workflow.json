@@ -1,5 +1,9 @@
 {
-  "name": "DuckClaw 🦆⚔️ Telegram Bot",
+  "name": "DuckClaw 🦆⚔️",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "urlMacMini": "100.99.72.63 (Tailscale Mac Mini). Gateway en :8000."
+  },
   "nodes": [
     {
       "parameters": {
@@ -27,7 +31,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://100.97.151.69:8000/api/v1/agent/research_worker/chat",
+        "url": "http://100.99.72.63:8000/api/v1/agent/chat",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -43,7 +47,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"message\": \"{{ $json.message.text }}\",\n  \"session_id\": \"{{ $json.message.chat.id }}\"\n}",
+        "jsonBody": "={\n  \"message\": \"{{ $json.message.text }}\",\n  \"session_id\": \"{{ $json.message.chat.id }}\",\n  \"stream\": false\n}",
         "options": {}
       },
       "id": "e9a7e089-cf73-4ea2-97b7-6ec7e052cf07",
@@ -58,7 +62,7 @@
     {
       "parameters": {
         "chatId": "={{ $json.session_id }}",
-        "text": "={{ $json.response }}",
+        "text": "={{ $json.response || $json.detail || 'Error al procesar. Intenta de nuevo.' }}",
         "additionalFields": {
           "parse_mode": "Markdown"
         }

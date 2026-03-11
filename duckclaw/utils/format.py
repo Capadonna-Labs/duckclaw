@@ -421,6 +421,54 @@ def friendly_query_error(error_message: str) -> str | None:
     return "La tabla no existe. Revisa el nombre."
 
 
+# Tablas internas que no deben mostrarse al usuario (schema dumps)
+_INTERNAL_TABLE_PREFIXES = frozenset({
+    "_duckpgq", "agent_config", "agent_memory", "memory_edges", "memory_nodes",
+    "telegram_conversation", "telegram_messages", "api_conversation",
+})
+
+
+def normalize_reply_for_user(reply: str) -> str:
+    """
+    Normaliza respuestas crudas (SQL, schema dumps) para mostrarlas al usuario.
+    Evita que lleguen a Telegram: esquemas internos, NULL, resultados sin formato.
+    """
+    if not reply or not reply.strip():
+        return reply or ""
+    s = reply.strip()
+    # Resultado: sum(monto): NULL o similar → mensaje amigable
+    if re.search(r"Resultado:.*:\s*(NULL|None|null)\b", s, re.I):
+        return "No hay datos registrados aún. Registra transacciones para ver tu resumen."
+    # "Resultado: X: null" en cualquier variante
+    if re.search(r"Resultado:\s*\w+\([^)]+\):\s*(null|NULL|None)", s):
+        return "No hay datos registrados aún. Registra transacciones para ver tu resumen."
+    # Tablas disponibles con dump de schema interno → filtrar a tablas de negocio
+    if "Tablas disponibles" in s or (s.startswith("- ") and (":" in s or "." in s)):
+        lines = s.split("\n")
+        user_tables = []
+        for line in lines:
+            # Formato "- schema.table" o "- name: cols"
+            m = re.match(r"^-\s+([a-zA-Z0-9_.]+)(?::|$)", line.strip())
+            if m:
+                full = m.group(1)
+                t = full.split(".")[-1].lower() if "." in full else full.lower()
+                if not any(t.startswith(p) for p in _INTERNAL_TABLE_PREFIXES):
+                    user_tables.append(full)
+        if user_tables:
+            return f"Tablas disponibles: {', '.join(user_tables)}."
+        if "Tablas disponibles" in s:
+            return "No hay tablas de datos disponibles."
+    # Intentar format_tool_reply para JSON
+    if s.startswith("[") or s.startswith("{"):
+        try:
+            formatted = format_tool_reply(s)
+            if formatted != s:
+                return formatted
+        except Exception:
+            pass
+    return s
+
+
 def format_tool_reply(raw: str) -> str:
     """Convierte el resultado crudo de una herramienta en un mensaje legible para el usuario."""
     if not raw or not raw.strip():
@@ -448,10 +496,12 @@ def format_tool_reply(raw: str) -> str:
             return f"Se encontraron {len(data)} registro(s)." if len(data) > 3 else s
         except (json.JSONDecodeError, TypeError, IndexError, KeyError):
             pass
-    # Si es un objeto JSON con "error", mensaje amigable para el usuario
+    # Si es un objeto JSON con "error" o "status": "ok", mensaje amigable
     if s.startswith("{"):
         try:
             data = json.loads(s)
+            if isinstance(data, dict) and data.get("status") == "ok":
+                return "Operación completada."
             if isinstance(data, dict) and "error" in data:
                 err = str(data.get("error", ""))
                 friendly = friendly_query_error(err)
@@ -459,6 +509,8 @@ def format_tool_reply(raw: str) -> str:
                     return friendly
                 if "Catalog Error" in err or "Table" in err or "does not exist" in err:
                     return "Esa tabla no existe en la base de datos. Pregunta por las tablas disponibles o revisa el nombre."
+                if "unrecognized configuration parameter" in err or "date_format" in err:
+                    return "La base de datos requiere actualización. Revisa la versión de DuckDB o contacta soporte."
                 if "Query vacío" in err or "vacío" in err:
                     return "No se envió ninguna consulta."
                 return "No se pudo completar la operación. Revisa la consulta o los datos."

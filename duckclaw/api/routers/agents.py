@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+
+_chat_log = logging.getLogger(__name__)
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
+tenant_router = APIRouter(prefix="/api/v1/t", tags=["agent-tenant"])
 
 # Cache de grafos por worker_id (evitar rebuild en cada request)
 
@@ -88,10 +92,25 @@ def _get_db_path() -> str:
     return str(Path(__file__).resolve().parent.parent.parent.parent / "db" / "gateway.duckdb")
 
 
-def _get_or_build_worker_graph(worker_id: str) -> Any:
-    """Construye o recupera el grafo del worker desde cache."""
-    if worker_id in _graph_cache:
-        return _graph_cache[worker_id]
+def _get_llm_config_for_session(db: Any, session_id: str) -> tuple[str, str, str]:
+    """Obtiene (provider, model, base_url) para la sesión: agent_config primero, luego env."""
+    from duckclaw.agents.on_the_fly_commands import get_chat_state, _get_global_config
+    p = get_chat_state(db, session_id, "llm_provider") or _get_global_config(db, "llm_provider")
+    m = get_chat_state(db, session_id, "llm_model") or _get_global_config(db, "llm_model")
+    u = get_chat_state(db, session_id, "llm_base_url") or _get_global_config(db, "llm_base_url")
+    provider = (p or os.environ.get("DUCKCLAW_LLM_PROVIDER", "")).strip()
+    model = (m or os.environ.get("DUCKCLAW_LLM_MODEL", "")).strip()
+    base_url = (u or os.environ.get("DUCKCLAW_LLM_BASE_URL", "")).strip()
+    return provider, model, base_url
+
+
+def _get_or_build_worker_graph(worker_id: str, session_id: Optional[str] = None) -> Any:
+    """Construye o recupera el grafo del worker desde cache. Soporta llm por sesión (/model)."""
+    db = _get_db()
+    provider, model, base_url = _get_llm_config_for_session(db, session_id or "default")
+    cache_key = (worker_id, provider, model, base_url)
+    if cache_key in _graph_cache:
+        return _graph_cache[cache_key]
     from duckclaw.forge import AgentAssembler, WORKERS_TEMPLATES_DIR
     from duckclaw.integrations.llm_providers import build_llm
     import logging
@@ -101,26 +120,32 @@ def _get_or_build_worker_graph(worker_id: str) -> Any:
     db_path = _get_db_path()
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
-    provider = os.environ.get("DUCKCLAW_LLM_PROVIDER", "").strip()
-    model = os.environ.get("DUCKCLAW_LLM_MODEL", "").strip()
-    base_url = os.environ.get("DUCKCLAW_LLM_BASE_URL", "").strip()
     llm = None
     if provider and provider != "none_llm":
         try:
             llm = build_llm(provider, model, base_url)
         except Exception as e:
-            import logging
             logging.getLogger(__name__).warning("build_llm failed for %s: %s", provider, e)
+
+    instance_name = None
+    try:
+        from duckclaw.workers.manifest import load_manifest
+        templates_root = WORKERS_TEMPLATES_DIR.parent.parent
+        spec = load_manifest(worker_id, templates_root)
+        instance_name = getattr(spec, "name", None) or worker_id
+    except Exception:
+        instance_name = worker_id
 
     graph = AgentAssembler.from_yaml(manifest_path).build(
         db=None,
         llm=llm,
         db_path=db_path,
+        instance_name=instance_name,
         llm_provider=provider if provider else None,
         llm_model=model if model else None,
         llm_base_url=base_url if base_url else None,
     )
-    _graph_cache[worker_id] = graph
+    _graph_cache[cache_key] = graph
     return graph
 
 
@@ -135,7 +160,15 @@ async def _ainvoke(
     except ImportError:
         pass
     # "input" va primero para que LangSmith muestre el mensaje del usuario en la columna Input
-    state = {"input": message, "incoming": message, "history": history or [], "chat_id": chat_id}
+    # Incluir messages para grafos que filtran por input_schema; incoming en varios canales por compatibilidad
+    from langchain_core.messages import HumanMessage
+    state = {
+        "input": message,
+        "incoming": message,
+        "messages": [HumanMessage(content=message)],
+        "history": history or [],
+        "chat_id": chat_id,
+    }
     loop = asyncio.get_event_loop()
     
     metadata = metadata or {}
@@ -148,10 +181,18 @@ async def _ainvoke(
     full_metadata = {"session_id": chat_id, "thread_id": chat_id}
     full_metadata.update(metadata)
 
+    run_name = "DuckClaw"
+    try:
+        spec = getattr(graph, "_worker_spec", None)
+        if spec:
+            run_name = getattr(spec, "name", run_name) or run_name
+    except Exception:
+        pass
+    full_metadata["incoming"] = message
     config = {
-        "configurable": {"thread_id": chat_id},
+        "configurable": {"thread_id": chat_id, "incoming": message},
         "metadata": full_metadata,
-        "run_name": "DuckClaw"
+        "run_name": run_name,
     }
     
     send_to_langsmith = os.environ.get("DUCKCLAW_SEND_TO_LANGSMITH", "false").lower() == "true"
@@ -177,8 +218,18 @@ def _safe_sql(s: str) -> str:
     return (s or "").replace("'", "''")[:256]
 
 
+def _normalize_reply_for_user(text: str) -> str:
+    """Normaliza respuestas crudas (schema dumps, NULL) antes de enviar al usuario."""
+    from duckclaw.utils import normalize_reply_for_user
+    return normalize_reply_for_user(text)
+
+
 def _sanitize_for_telegram(text: str) -> str:
-    """Quita Markdown que Telegram no interpreta bien: ## ### #### y líneas ---."""
+    """
+    Limpia la salida para que Telegram Markdown (parse_mode='Markdown') la interprete bien.
+    - Quita ## ### #### y líneas ---
+    - Escapa _ * ` [ que rompen el parser cuando no forman entidades válidas
+    """
     if not text or not isinstance(text, str):
         return text
     lines = text.split("\n")
@@ -188,6 +239,12 @@ def _sanitize_for_telegram(text: str) -> str:
         if stripped in ("---", "***", "___"):
             continue
         cleaned = re.sub(r"^#+\s*", "", line.lstrip())
+        # Escapar para Telegram MarkdownV1: _ * ` [ (evita "can't parse entities")
+        cleaned = cleaned.replace("\\", "\\\\")
+        cleaned = cleaned.replace("_", "\\_")
+        cleaned = cleaned.replace("*", "\\*")
+        cleaned = cleaned.replace("`", "\\`")
+        cleaned = cleaned.replace("[", "\\[")
         out.append(cleaned)
     return "\n".join(out).strip()
 
@@ -248,26 +305,50 @@ def _get_session_status(session_id: str) -> str:
         return "IDLE"
 
 
+def _get_default_worker() -> str:
+    """Worker por defecto cuando no hay /role previo. Env: DUCKCLAW_DEFAULT_WORKER."""
+    return os.environ.get("DUCKCLAW_DEFAULT_WORKER", "finanz").strip() or "finanz"
+
+
+@router.post("/chat", summary="Chat con DuckClaw (worker dinámico vía /role)")
+async def chat_with_agent_dynamic(payload: ChatRequest):
+    """
+    Endpoint genérico para n8n/Telegram. El worker se determina por agent_config (/role).
+    Si no hay /role previo, usa DUCKCLAW_DEFAULT_WORKER (default: finanz).
+    Usa este endpoint en lugar de /agent/finanz/chat para soportar /role.
+    """
+    session_id = payload.session_id or "default"
+    db = _get_db()
+    from duckclaw.agents.on_the_fly_commands import get_worker_id_for_chat
+    worker_id = (get_worker_id_for_chat(db, session_id) or "").strip() or _get_default_worker()
+    return await chat_with_agent(worker_id, payload)
+
+
 @router.post("/{worker_id}/chat", summary="Chat con agente (streaming SSE o JSON)")
 async def chat_with_agent(worker_id: str, payload: ChatRequest):
     """
     Envía un mensaje al agente. Retorna StreamingResponse (SSE) token por token o JSON.
     Si MANUAL_MODE (HITL), rechaza y retorna status=ignored.
+    Respeta /role: si el chat tiene worker_id en agent_config (por /role previo), usa ese.
     """
     session_id = payload.session_id or "default"
     status = _get_session_status(session_id)
     if status == "MANUAL_MODE":
         return {"status": "ignored", "reason": "manual_mode_active", "session_id": session_id}
 
+    db = _get_db()
+    # Respetar worker_id de /role (agent_config) para Telegram/n8n; si no hay override, usar el de la URL
+    from duckclaw.agents.on_the_fly_commands import get_worker_id_for_chat
+    effective_worker_id = (get_worker_id_for_chat(db, session_id) or "").strip() or worker_id
+
     try:
-        graph = _get_or_build_worker_graph(worker_id)
+        graph = _get_or_build_worker_graph(effective_worker_id, session_id)
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Error inicializando worker: {exc}")
 
-    db = _get_db()
-    history = payload.history or _get_history(db, session_id, worker_id, limit=6)
+    history = payload.history or _get_history(db, session_id, effective_worker_id, limit=6)
 
     if not payload.stream:
         # Modo JSON directo para n8n / webhooks
@@ -276,16 +357,31 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
             from duckclaw.agents.on_the_fly_commands import handle_command
             cmd_reply = handle_command(db, session_id, payload.message)
             if cmd_reply:
+                cmd_reply = _sanitize_for_telegram(cmd_reply)
+                _chat_log.info("[chat] IN=%r | OUT=%r", (payload.message or "")[:120], (cmd_reply or "")[:120])
                 return {"response": cmd_reply, "session_id": session_id}
 
+            _chat_log.info("[chat] IN=%r", (payload.message or "")[:200])
             extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
             reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
+            reply = _normalize_reply_for_user(reply)
             reply = _sanitize_for_telegram(reply)
-            _persist_turn(db, session_id, worker_id, "user", payload.message)
-            _persist_turn(db, session_id, worker_id, "assistant", reply)
-            return {"response": reply, "session_id": session_id}
+            _chat_log.info("[chat] OUT=%r", (reply or "")[:200])
+            _persist_turn(db, session_id, effective_worker_id, "user", payload.message)
+            _persist_turn(db, session_id, effective_worker_id, "assistant", reply)
+            return {"response": reply or "Sin respuesta.", "session_id": session_id}
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+            # Para n8n: siempre retornar JSON con "response" para que Responder Telegram no falle
+            import logging
+            import traceback
+            _log = logging.getLogger(__name__)
+            _log.warning("chat error: %s\n%s", exc, traceback.format_exc())
+            return {
+                "response": "Lo siento, hubo un error al procesar. Intenta de nuevo.",
+                "session_id": session_id,
+            }
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
@@ -293,17 +389,22 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
             from duckclaw.agents.on_the_fly_commands import handle_command
             cmd_reply = handle_command(db, session_id, payload.message)
             if cmd_reply:
+                cmd_reply = _sanitize_for_telegram(cmd_reply)
+                _chat_log.info("[chat] IN=%r | OUT=%r", (payload.message or "")[:120], (cmd_reply or "")[:120])
                 for word in cmd_reply.split(" "):
                     yield f"data: {word} \n\n"
                     await asyncio.sleep(0.02)
                 yield "data: [DONE]\n\n"
                 return
 
+            _chat_log.info("[chat] IN=%r", (payload.message or "")[:200])
             extra_meta = payload.model_dump(exclude={"message", "session_id", "history", "stream"})
             reply = await _ainvoke(graph, payload.message, history, session_id, metadata=extra_meta)
+            reply = _normalize_reply_for_user(reply)
             reply = _sanitize_for_telegram(reply)
-            _persist_turn(db, session_id, worker_id, "user", payload.message)
-            _persist_turn(db, session_id, worker_id, "assistant", reply)
+            _chat_log.info("[chat] OUT=%r", (reply or "")[:200])
+            _persist_turn(db, session_id, effective_worker_id, "user", payload.message)
+            _persist_turn(db, session_id, effective_worker_id, "assistant", reply)
             for word in reply.split(" "):
                 yield f"data: {word} \n\n"
                 await asyncio.sleep(0.02)
@@ -343,3 +444,27 @@ async def delete_history(worker_id: str, session_id: str):
         f"DELETE FROM api_conversation WHERE session_id = '{sid}' AND worker_id = '{wid}'"
     )
     return {"ok": True, "message": "Historial borrado"}
+
+
+# --- Tenant routes: /api/v1/t/{tenant_id}/agent/... (delegan a handlers legacy) ---
+
+
+@tenant_router.post("/{tenant_id}/agent/{worker_id}/chat", summary="Chat con agente (tenant)")
+async def chat_with_agent_tenant(tenant_id: str, worker_id: str, payload: ChatRequest, request: Request):
+    """Mismo handler que chat legacy; tenant_id en request.state para audit y namespacing futuro."""
+    request.state.tenant_id = tenant_id
+    return await chat_with_agent(worker_id, payload)
+
+
+@tenant_router.get("/{tenant_id}/agent/{worker_id}/history", summary="Historial de chat (tenant)")
+async def get_history_tenant(tenant_id: str, worker_id: str, session_id: str, request: Request, limit: int = 6):
+    """Mismo handler que history legacy; tenant_id en request.state."""
+    request.state.tenant_id = tenant_id
+    return await get_history(worker_id, session_id, limit)
+
+
+@tenant_router.delete("/{tenant_id}/agent/{worker_id}/history", summary="Borrar historial (tenant)")
+async def delete_history_tenant(tenant_id: str, worker_id: str, session_id: str, request: Request):
+    """Mismo handler que delete_history legacy; tenant_id en request.state."""
+    request.state.tenant_id = tenant_id
+    return await delete_history(worker_id, session_id)

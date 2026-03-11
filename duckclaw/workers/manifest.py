@@ -59,12 +59,13 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
     skills_list = data.get("skills") or []
     if isinstance(skills_list, str):
         skills_list = [s.strip() for s in skills_list.split(",") if s.strip()]
-    # skills: strings (nombres) o dicts (ej. {github: {...}}, {research: {...}}, {tailscale: {...}}, {sft: {...}})
+    # skills: strings (nombres) o dicts (ej. {github: {...}}, {research: {...}}, {tailscale: {...}}, {sft: {...}}, {ibkr: {...}})
     skills_names = [s for s in skills_list if isinstance(s, str)]
     github_config = None
     research_config = None
     tailscale_config = None
     sft_config = None
+    ibkr_config = None
     for s in skills_list:
         if isinstance(s, dict):
             if "github" in s and github_config is None:
@@ -75,6 +76,8 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
                 tailscale_config = s["tailscale"] if isinstance(s.get("tailscale"), dict) else {}
             if "sft" in s and sft_config is None:
                 sft_config = s["sft"] if isinstance(s.get("sft"), dict) else {}
+            if "ibkr" in s and ibkr_config is None:
+                ibkr_config = s["ibkr"] if isinstance(s.get("ibkr"), dict) else {}
     if github_config is None and isinstance(data.get("github"), dict):
         github_config = data["github"]
     if research_config is None and isinstance(data.get("research"), dict):
@@ -83,6 +86,8 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         tailscale_config = data["tailscale"]
     if sft_config is None and isinstance(data.get("sft"), dict):
         sft_config = data["sft"]
+    if ibkr_config is None and isinstance(data.get("ibkr"), dict):
+        ibkr_config = data["ibkr"]
     inference_config = None
     if isinstance(data.get("inference"), dict):
         inference_config = data["inference"]
@@ -107,6 +112,7 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         research_config=research_config,
         tailscale_config=tailscale_config,
         sft_config=sft_config,
+        ibkr_config=ibkr_config,
         inference_config=inference_config,
         homeostasis_config=homeostasis_config,
     )
@@ -164,7 +170,7 @@ class WorkerSpec:
         "worker_id", "name", "schema_name", "llm_required", "temperature",
         "topology", "skills_list", "allowed_tables", "read_only", "worker_dir",
         "github_config", "research_config", "tailscale_config", "sft_config",
-        "inference_config", "homeostasis_config",
+        "ibkr_config", "inference_config", "homeostasis_config",
     )
 
     def __init__(
@@ -183,6 +189,7 @@ class WorkerSpec:
         research_config: Optional[dict] = None,
         tailscale_config: Optional[dict] = None,
         sft_config: Optional[dict] = None,
+        ibkr_config: Optional[dict] = None,
         inference_config: Optional[dict] = None,
         homeostasis_config: Optional[dict] = None,
     ):
@@ -200,5 +207,6 @@ class WorkerSpec:
         self.research_config = research_config
         self.tailscale_config = tailscale_config
         self.sft_config = sft_config
+        self.ibkr_config = ibkr_config
         self.inference_config = inference_config
         self.homeostasis_config = homeostasis_config

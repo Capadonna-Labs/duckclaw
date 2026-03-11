@@ -101,6 +101,21 @@ Opcional: "Subir a LangSmith" para enviar trazas a LangSmith (requiere `LANGCHAI
 - **Systemd**: `duckops deploy systemd` (Linux)
 - **DB**: DuckDB con tablas `telegram_messages`, `telegram_conversation`, `agent_config`
 
+### 2.9 n8n vs bot directo: ¿dónde llegan las trazas?
+
+Hay dos modos de conectar Telegram con DuckClaw:
+
+| Modo | Flujo | Trazas en n8n | LangSmith |
+|------|-------|---------------|-----------|
+| **Bot directo** | Telegram → Python (`core.integrations.telegram_bot` o `duckclaw.agents.telegram_bot`) | No: n8n no participa | Sí, si `DUCKCLAW_SEND_TO_LANGSMITH=true` |
+| **n8n como orquestador** | Telegram → n8n (Telegram Trigger) → API Gateway (`/api/v1/agent/chat`) → n8n responde | Sí: cada mensaje dispara una ejecución en n8n | Sí, si el Gateway tiene `DUCKCLAW_SEND_TO_LANGSMITH=true` |
+
+**Importante:** Usa `/api/v1/agent/chat` (no `/api/v1/agent/finanz/chat`). El endpoint genérico respeta el comando `/role` para cambiar de trabajador virtual (finanz, support, etc.) por sesión.
+
+**Para que las trazas lleguen a n8n:** El webhook de Telegram debe apuntar a n8n, no al bot Python. Importa `n8n_telegram_workflow.json`, activa el workflow y configura el webhook del bot en n8n. Si el bot Python está corriendo con `core.integrations.telegram_bot`, Telegram envía los mensajes al bot, no a n8n — en ese caso, detén el bot Python y deja que n8n reciba los updates.
+
+**LangSmith:** Configura `LANGCHAIN_PROJECT=Finanz` (o el nombre del worker) en `.env` para que las trazas aparezcan en el proyecto correcto. El API Gateway usa el nombre del manifest (`FinanzWorker`) como proyecto cuando no está definido.
+
 ---
 
 ## 3. Extender a otros canales

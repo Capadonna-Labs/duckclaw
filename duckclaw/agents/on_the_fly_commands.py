@@ -236,6 +236,52 @@ def _set_global_config(db: Any, key: str, value: str) -> None:
     )
 
 
+_PROVIDERS = ("mlx", "ollama", "openai", "anthropic", "deepseek", "groq")
+
+# Modelo por defecto al cambiar provider (evita "Model Not Exist" al pasar de MLX a cloud)
+_DEFAULT_MODEL_BY_PROVIDER = {
+    "deepseek": "deepseek-chat",
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-5-haiku-20241022",
+    "groq": "llama-3.3-70b-versatile",
+    "mlx": "",  # usa MLX_MODEL_ID o /v1/models
+    "ollama": "llama3.2",
+}
+
+
+def execute_model(db: Any, chat_id: Any, args: str) -> str:
+    """/model [provider=mlx] [model=...] [base_url=...]: cambia proveedor/modelo LLM en caliente. Sin args muestra el actual."""
+    if not args or not args.strip():
+        p = get_chat_state(db, chat_id, "llm_provider") or _get_global_config(db, "llm_provider")
+        m = get_chat_state(db, chat_id, "llm_model") or _get_global_config(db, "llm_model")
+        u = get_chat_state(db, chat_id, "llm_base_url") or _get_global_config(db, "llm_base_url")
+        env_p = os.environ.get("DUCKCLAW_LLM_PROVIDER", "").strip()
+        env_m = os.environ.get("DUCKCLAW_LLM_MODEL", "").strip()
+        env_u = os.environ.get("DUCKCLAW_LLM_BASE_URL", "").strip()
+        provider = p or env_p or "—"
+        model = m or env_m or "—"
+        base_url = (u or env_u or "—")[:50] + "…" if (u or env_u) and len((u or env_u) or "") > 50 else (u or env_u or "—")
+        return f"Modelo actual:\n• provider: {provider}\n• model: {model}\n• base_url: {base_url}\n\nUso: /model provider=mlx | /model provider=deepseek | /model model=Slayer-8B"
+    for part in args.split("|"):
+        part = part.strip()
+        if "=" in part:
+            k, _, v = part.partition("=")
+            k, v = k.strip().lower(), v.strip()
+            if k == "provider":
+                if v and v.lower() not in _PROVIDERS:
+                    return f"Provider desconocido: {v}. Válidos: {', '.join(_PROVIDERS)}"
+                set_chat_state(db, chat_id, "llm_provider", v)
+                # Al cambiar provider, resetear model al default para evitar "Model Not Exist"
+                # (ej. Slayer-8B-v1.1 no existe en DeepSeak)
+                default_model = _DEFAULT_MODEL_BY_PROVIDER.get(v.lower(), "")
+                set_chat_state(db, chat_id, "llm_model", default_model)
+            elif k == "model":
+                set_chat_state(db, chat_id, "llm_model", v)
+            elif k == "base_url":
+                set_chat_state(db, chat_id, "llm_base_url", v)
+    return "✅ Modelo actualizado. Los próximos mensajes usarán esta config."
+
+
 def execute_prompt(db: Any, chat_id: Any, new_prompt: str) -> str:
     """/prompt [nuevo system prompt]: cambia el system prompt en caliente. Sin argumentos muestra el actual."""
     if not new_prompt:
@@ -292,6 +338,8 @@ def handle_command(db: Any, chat_id: Any, text: str) -> Optional[str]:
         return execute_approve_reject(db, chat_id, False)
     if name in ("prompt", "system_prompt", "system"):
         return execute_prompt(db, chat_id, args)
+    if name in ("model", "provider", "llm"):
+        return execute_model(db, chat_id, args)
     return None
 
 

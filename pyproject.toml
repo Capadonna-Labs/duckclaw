@@ -65,6 +65,8 @@ serve = [
     "PyJWT>=2.0.0",
     "slowapi>=0.1.9",
     "sqlglot>=20.0.0",
+    "python-multipart>=0.0.6",
+    "langchain-openai>=0.2.0",
 ]
 
 # queue: Redis + ARQ para ActivityManager (orquestación)

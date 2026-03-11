@@ -18,7 +18,9 @@ graph TD
 
 ### A. Módulo de Agentes (Streaming)
 *   **`POST /api/v1/agent/{worker_id}/chat`**: Envía un mensaje al agente.
-    *   *Response:* `StreamingResponse` (SSE) para recibir la respuesta del agente token por token.
+    *   *Body:* `message`, `session_id`, `history` (opcional), **`stream`** (default: true).
+    *   *Response (stream=true):* `StreamingResponse` (SSE) token por token.
+    *   *Response (stream=false):* JSON `{"response": "...", "session_id": "..."}` — **requerido para n8n/webhooks**.
 *   **`GET /api/v1/agent/{worker_id}/history`**: Recupera el historial de chat (truncado a K=6).
 
 ### B. Módulo de Homeostasis (Dashboard)

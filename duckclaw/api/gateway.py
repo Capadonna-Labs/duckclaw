@@ -10,8 +10,23 @@ Uso:
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+# Logs de depuración para Finanz e IBKR (pm2 logs DuckClaw-Gateway)
+def _setup_finanz_logs() -> None:
+    import sys
+    fmt = logging.Formatter("%(levelname)s:     %(name)s: %(message)s")
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(fmt)
+    for name in ("duckclaw.workers.factory", "duckclaw.forge.skills.ibkr_bridge", "duckclaw.api.routers.agents"):
+        log = logging.getLogger(name)
+        log.setLevel(logging.INFO)
+        if not log.handlers:
+            log.addHandler(handler)
+            log.propagate = False  # Evitar duplicados en root
+_setup_finanz_logs()
 
 # Load .env
 def _load_dotenv() -> None:
@@ -79,6 +94,7 @@ app.middleware("http")(auth_middleware)
 
 # Routers
 app.include_router(agents.router)
+app.include_router(agents.tenant_router)
 app.include_router(media.router)
 app.include_router(activity.router)
 app.include_router(thread.router)
@@ -93,7 +109,9 @@ async def root():
         "version": "0.1.0",
         "endpoints": [
             "/api/v1/agent/workers",
+            "/api/v1/agent/chat",
             "/api/v1/agent/{worker_id}/chat",
+            "/api/v1/t/{tenant_id}/agent/{worker_id}/chat",
             "/api/v1/agent/{worker_id}/media/{thread_id}",
             "/api/v1/agent/{worker_id}/history",
             "/api/v1/activity/status",

@@ -45,19 +45,52 @@ def _mask_dict(obj: Any) -> Any:
     return obj
 
 
+def _get_source_ip(request: Any) -> Optional[str]:
+    """Obtiene source_ip: X-Forwarded-For (Cloudflare) o request.client.host."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if getattr(request, "client", None) and hasattr(request.client, "host"):
+        return request.client.host
+    return None
+
+
+def _get_source_type(auth_source: str) -> str:
+    """
+    Mapea auth_source a INTERNAL_TRUSTED o PUBLIC_EXTERNAL (Habeas Data).
+    tailscale = INTERNAL_TRUSTED (VPS/n8n vía Mesh).
+    jwt, public = PUBLIC_EXTERNAL (Angular, Cloudflare).
+    """
+    if auth_source == "tailscale":
+        return "INTERNAL_TRUSTED"
+    if auth_source in ("jwt", "public"):
+        return "PUBLIC_EXTERNAL"
+    return "UNKNOWN"
+
+
 async def audit_middleware(request: Any, call_next: Any):
     """
-    Registra cada petición con user_id, worker_id, endpoint, timestamp.
-    Envía a LangSmith si LANGCHAIN_TRACING_V2=true.
-    Anonimiza message/payload antes de persistir (Habeas Data).
+    Registra cada petición con user_id, worker_id, endpoint, timestamp,
+    source_ip y source_type (INTERNAL_TRUSTED / PUBLIC_EXTERNAL) para Habeas Data.
+    Anonimiza message/payload antes de persistir.
     """
     t0 = time.time()
     path = request.url.path or "/"
     method = getattr(request, "method", "GET") or "GET"
 
-    # Extraer worker_id de path: /api/v1/agent/{worker_id}/... o /api/v1/homeostasis/{worker_id}/...
-    worker_id = ""
+    # source_ip y source_type (auth debe haber corrido antes; middleware order: auth -> rate_limit -> audit)
+    source_ip = _get_source_ip(request)
+    auth_source = getattr(request.state, "auth_source", "unknown")
+    source_type = _get_source_type(auth_source)
+
+    # Extraer tenant_id de path: /api/v1/t/{tenant_id}/...
+    tenant_id = None
     parts = path.strip("/").split("/")
+    if len(parts) >= 4 and parts[0] == "api" and parts[1] == "v1" and parts[2] == "t":
+        tenant_id = parts[3]
+
+    # Extraer worker_id de path: /api/v1/agent/{worker_id}/... o /api/v1/t/{tenant}/agent/{worker_id}/...
+    worker_id = ""
     if "agent" in parts:
         idx = parts.index("agent")
         if idx + 1 < len(parts):
@@ -81,10 +114,13 @@ async def audit_middleware(request: Any, call_next: Any):
     audit_entry = {
         "user_id": user_id,
         "worker_id": worker_id or None,
+        "tenant_id": tenant_id,
         "endpoint": f"{method} {path}",
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_ms": elapsed_ms,
         "status_code": getattr(response, "status_code", None),
+        "source_ip": source_ip,
+        "source_type": source_type,
     }
 
     # (Eliminado) Ya no se envían trazas de gateway_audit a LangSmith para mantener el panel limpio

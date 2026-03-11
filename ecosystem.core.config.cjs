@@ -8,7 +8,7 @@ module.exports = {
     {
       name: "DuckClaw-Brain",
       script: "/Users/juanjosearevalocamargo/Desktop/duckclaw/.venv/bin/python3",
-      args: "-m core.integrations.telegram_bot",
+      args: "-m duckclaw.agents.telegram_bot",
       cwd: "/Users/juanjosearevalocamargo/Desktop/duckclaw",
       interpreter: "none",
       autorestart: true,
@@ -21,6 +21,8 @@ module.exports = {
         DUCKCLAW_LLM_PROVIDER: "mlx",
         DUCKCLAW_LLM_MODEL: "Slayer-8B-v1.1",
         DUCKCLAW_LLM_BASE_URL: "http://127.0.0.1:8080/v1",
+        IBKR_PORTFOLIO_API_URL: "http://100.97.151.69:8002/api/portfolio/summary",
+        IBKR_PORTFOLIO_API_KEY: "shared_secret_tailscale",
       },
     },
   ],

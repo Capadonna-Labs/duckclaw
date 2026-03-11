@@ -14,7 +14,6 @@ def get_tools(db: Any, schema_name: str, spec: Any = None) -> list:
         """Devuelve resumen mensual: total ingresos, total gastos, balance. year y month opcionales (default: mes actual)."""
         try:
             if year and month:
-                db.execute(f"SET date_format = '%Y-%m'")
                 r = db.query(
                     f"SELECT SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END) AS ingresos, "
                     f"SUM(CASE WHEN amount < 0 THEN amount ELSE 0 END) AS gastos, "
