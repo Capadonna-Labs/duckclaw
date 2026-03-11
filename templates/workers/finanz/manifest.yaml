@@ -8,6 +8,8 @@ read_only: false
 allowed_tables:
   - transactions
   - categories
+  - cuentas
+  - presupuestos
 llm:
   required: true
   temperature: 0.2

@@ -389,17 +389,23 @@ def build_worker_graph(
                         break
             is_schema = _is_schema_query(incoming)
             is_portfolio = has_ibkr and _is_portfolio_query(incoming)
+            # No forzar herramienta si el último mensaje ya es ToolMessage (ya ejecutamos la tool):
+            # así el LLM puede responder con texto y no entrar en bucle (inspect_schema -> agent -> inspect_schema).
+            last_msg = (state.get("messages") or [])[-1] if state.get("messages") else None
+            already_has_tool_result = last_msg is not None and isinstance(last_msg, ToolMessage)
+            force_schema = is_schema and not already_has_tool_result
+            force_portfolio = is_portfolio and not already_has_tool_result
             _log.info(
                 "[finanz] incoming=%r | is_schema=%s | is_portfolio=%s | forced_tool=%s",
                 incoming[:80] + ("..." if len(incoming) > 80 else ""),
                 is_schema,
                 is_portfolio,
-                "inspect_schema" if is_schema else ("get_ibkr_portfolio" if is_portfolio else "auto"),
+                "inspect_schema" if force_schema else ("get_ibkr_portfolio" if force_portfolio else "auto"),
             )
-            if is_schema:
+            if force_schema:
                 llm_forced = llm.bind_tools(tools, tool_choice={"type": "function", "function": {"name": "inspect_schema"}})
                 resp = llm_forced.invoke(state["messages"])
-            elif is_portfolio:
+            elif force_portfolio:
                 llm_forced = llm.bind_tools(tools, tool_choice={"type": "function", "function": {"name": "get_ibkr_portfolio"}})
                 resp = llm_forced.invoke(state["messages"])
             else:

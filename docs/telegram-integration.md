@@ -85,3 +85,14 @@ print(db.query("SELECT chat_id, username, text, received_at FROM telegram_messag
   pip install -e ".[telegram]" --no-build-isolation
   ```
   and install build deps in your venv if needed.
+
+## Which DB is used when you ask from Telegram (Gateway)
+
+When you send a message from Telegram and it is handled by **DuckClaw-Gateway** (API), the Gateway uses the database path from **`DUCKCLAW_DB_PATH`**. On the Mac Mini that is typically `.../db/telegram.duckdb`.
+
+So when you ask *"qué tablas hay"* or any Finanz question (transacciones, presupuestos, estado de cuentas), the bot uses **that same `telegram.duckdb`** for:
+
+- **finance_worker**: `transactions`, `categories`, `cuentas` (Bancolombia, Nequi, Efectivo, etc.), `presupuestos`, `agent_beliefs`
+- **main**: `api_conversation`, `agent_config`, etc.
+
+Ensure `DUCKCLAW_DB_PATH` points to the DB you want (e.g. `db/telegram.duckdb`). If you sync that file from the VPS, run `scripts/sync_telegram_duckdb.sh` before starting the Gateway so the Mac uses the latest data.
