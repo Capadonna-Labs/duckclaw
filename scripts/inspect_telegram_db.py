@@ -25,15 +25,16 @@ for s, t in tables:
     n = db.execute(f'SELECT COUNT(*) FROM "{s}"."{t}"').fetchone()[0]
     print(f"  {s}.{t}: {n} filas")
 
-print("\n=== MUESTRA finance_worker ===")
+print("\n=== MUESTRA finance_worker (cuentas, transactions) ===")
 for s, t in tables:
     if s == "finance_worker":
         n = db.execute(f'SELECT COUNT(*) FROM "{s}"."{t}"').fetchone()[0]
         print(f"\n{s}.{t} ({n} filas):")
         if n > 0:
-            df = db.execute(f'SELECT * FROM "{s}"."{t}" LIMIT 5').fetchdf()
-            print(df.to_string())
-            if n > 5:
+            rows = db.execute(f'SELECT * FROM "{s}"."{t}" LIMIT 10').fetchall()
+            for row in rows:
+                print(" ", row)
+            if n > 10:
                 print("  ...")
 
 print("\n=== OTRAS TABLAS CON DATOS (api_conversation, etc.) ===")
@@ -42,7 +43,9 @@ for s, t in tables:
         n = db.execute(f'SELECT COUNT(*) FROM "{s}"."{t}"').fetchone()[0]
         if n > 0:
             print(f"\n{s}.{t}: {n} filas")
-            print(db.execute(f'SELECT * FROM "{s}"."{t}" LIMIT 2').fetchdf().to_string())
+            rows = db.execute(f'SELECT * FROM "{s}"."{t}" LIMIT 2').fetchall()
+            for row in rows:
+                print(" ", row)
 
 db.close()
 print("\nOK")
