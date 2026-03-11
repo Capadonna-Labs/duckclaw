@@ -34,5 +34,19 @@ CREATE TABLE IF NOT EXISTS finance_worker.presupuestos (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Deudas (acreedor, monto, cuotas, fechas, estado)
+CREATE TABLE IF NOT EXISTS finance_worker.deudas (
+  id INTEGER PRIMARY KEY,
+  descripcion VARCHAR,
+  acreedor VARCHAR NOT NULL,
+  monto REAL NOT NULL,
+  moneda VARCHAR DEFAULT 'COP',
+  fecha_inicio DATE,
+  fecha_vencimiento DATE,
+  tasa_interes REAL,
+  estado VARCHAR DEFAULT 'pendiente',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 INSERT INTO finance_worker.categories (id, name) VALUES (1, 'Otros')
 ON CONFLICT (id) DO NOTHING;

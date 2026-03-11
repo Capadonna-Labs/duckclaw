@@ -10,6 +10,7 @@ allowed_tables:
   - categories
   - cuentas
   - presupuestos
+  - deudas
 llm:
   required: true
   temperature: 0.2
