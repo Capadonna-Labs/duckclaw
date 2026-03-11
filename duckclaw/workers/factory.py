@@ -353,6 +353,12 @@ def build_worker_graph(
             # Excluir: tablas DuckDB, esquema o estructura de base de datos
             if any(k in t for k in ("tablas", "tabla", "duckdb", "esquema", "schema", "estructura", "qué tablas", "que tablas")):
                 return False
+            # Excluir: cuenta bancaria concreta (Bancolombia, etc.) -> debe usar run_sql sobre .duckdb
+            if any(k in t for k in ("cuenta de ", "cuenta bancolombia", "bancolombia", "en bancolombia", "saldo en mi cuenta")):
+                return False
+            # "Portfolio total" / "cuánto tengo en total" -> no forzar solo IBKR; el agente debe usar get_ibkr_portfolio + run_sql (cuentas en .duckdb)
+            if any(k in t for k in ("portfolio total", "en total", "resumen de todo", "cuánto tengo en total", "cuanto tengo en total")):
+                return False
             # "acciones" como palabra completa (no subcadena de "transacciones")
             kw = ("portfolio", "portafolio", "cuanto dinero", "cuánto dinero", "saldo ibkr", "dinero en bolsa", "resumen de mi portfolio", "estado de mis cuentas", "estado de cuenta", "mis cuentas")
             if any(k in t for k in kw):
