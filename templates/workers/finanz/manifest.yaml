@@ -8,11 +8,18 @@ read_only: false
 allowed_tables:
   - transactions
   - categories
+  - cuentas
+  - deudas
+  - presupuestos
 llm:
   required: true
   temperature: 0.2
 skills:
   - insert_transaction
+  - insert_cuenta
+  - insert_deuda
+  - insert_presupuesto
   - get_monthly_summary
+  - get_presupuesto_vs_real
   - categorize_expense
   - ibkr: {}  # Activa get_ibkr_portfolio (credenciales vía IBKR_PORTFOLIO_API_URL e IBKR_PORTFOLIO_API_KEY)
