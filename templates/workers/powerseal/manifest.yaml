@@ -13,3 +13,10 @@ skills:
   - handoff_trigger
   - fetch_product_catalog
   - search_products
+  - quote_engine
+  - document_dispatcher
+context_guard:
+  enabled: true
+  max_retries: 2
+crm:
+  enabled: true

@@ -124,9 +124,44 @@ def get_redis_settings() -> RedisSettings:
     return RedisSettings()
 
 
+async def graph_lead_profiler_job(
+    ctx: dict,
+    worker_id: str,
+    session_id: str,
+    message: str,
+    history: list,
+    reply: str,
+) -> int:
+    """
+    Job ARQ: extrae tripletas comerciales del chat y persiste en PGQ (Sovereign CRM).
+    Spec: specs/Sovereign_CRM_Memoria_Bicameral_DuckDB_PGQ.md
+    """
+    db_path = os.environ.get("DUCKCLAW_DB_PATH") or str(Path.cwd() / "db" / "gateway.duckdb")
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        from duckclaw import DuckClaw
+        from duckclaw.forge.crm.lead_profiler import graph_lead_profiler
+        from duckclaw.integrations.llm_providers import build_llm
+
+        db = DuckClaw(db_path)
+        provider = os.environ.get("DUCKCLAW_LLM_PROVIDER", "none_llm").strip().lower()
+        model = os.environ.get("DUCKCLAW_LLM_MODEL", "").strip()
+        base_url = os.environ.get("DUCKCLAW_LLM_BASE_URL", "").strip()
+        llm = build_llm(provider, model, base_url) if provider != "none_llm" else None
+        if llm is None:
+            return 0
+
+        chat_history = list(history or [])
+        chat_history.append({"role": "user", "content": message})
+        chat_history.append({"role": "assistant", "content": reply})
+        return graph_lead_profiler(db, llm, chat_history, lead_id=session_id)
+    except Exception:
+        return 0
+
+
 class WorkerSettings:
     """Configuración ARQ. Ejecutar: arq duckclaw.activity.worker.WorkerSettings"""
-    functions = [run_chat_job, process_multimodal_input]
+    functions = [run_chat_job, process_multimodal_input, graph_lead_profiler_job]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = get_redis_settings()

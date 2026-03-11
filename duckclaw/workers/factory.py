@@ -237,10 +237,22 @@ def build_worker_graph(
     from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
 
     has_homeostasis = bool(getattr(spec, "homeostasis_config", None))
+    crm_config = getattr(spec, "crm_config", None) or {}
+    crm_enabled = bool(crm_config.get("enabled", False))
     effective_prompt = (system_prompt or "").strip() + "\n\n" + _TASK_AWARENESS_PROMPT.strip()
 
     def prepare_node(state: dict) -> dict:
-        messages = [SystemMessage(content=effective_prompt)]
+        prompt = effective_prompt
+        if crm_enabled:
+            try:
+                from duckclaw.forge.crm.context_injector import graph_context_injector
+                lead_id = state.get("chat_id") or state.get("session_id") or "default"
+                lead_ctx = graph_context_injector(db, lead_id)
+                if lead_ctx:
+                    prompt = prompt + "\n\n<lead_context>\n" + lead_ctx + "\n</lead_context>"
+            except Exception:
+                pass
+        messages = [SystemMessage(content=prompt)]
         for h in (state.get("history") or []):
             role = (h.get("role") or "").lower()
             content = h.get("content") or ""
@@ -293,10 +305,12 @@ def build_worker_graph(
 
     def set_reply(state: dict) -> dict:
         from duckclaw.integrations.llm_providers import _strip_eot
-        msgs = state["messages"]
+        msgs = state.get("messages") or []
         last = msgs[-1]
         reply = getattr(last, "content", None) or str(last)
         reply = _strip_eot(reply or "").strip()
+        if not msgs:
+            return {"reply": "Sin respuesta generada."}
         if reply.startswith("{") and '"name"' in reply and ("parameters" in reply or '"args"' in reply):
             try:
                 from duckclaw.utils import format_tool_reply
@@ -315,6 +329,29 @@ def build_worker_graph(
         last = state["messages"][-1]
         return "tools" if getattr(last, "tool_calls", None) else "end"
 
+    # Context-Guard (FactChecker + SelfCorrection) para workers con catalog_retriever
+    context_guard_config = getattr(spec, "context_guard_config", None) or {}
+    context_guard_enabled = (
+        bool(context_guard_config.get("enabled", False))
+        and "catalog_retriever" in (spec.skills_list or [])
+    )
+    max_retries = int(context_guard_config.get("max_retries", 2))
+
+    def fact_check_node(state: dict) -> dict:
+        from duckclaw.forge.atoms.validators import fact_checker_node as _fc
+        return _fc(state, llm, max_retries=max_retries)
+
+    def self_correction_node(state: dict) -> dict:
+        from duckclaw.forge.atoms.validators import self_correction_node as _sc
+        return _sc(state, llm)
+
+    def handoff_reply_node(state: dict) -> dict:
+        from duckclaw.forge.atoms.validators import handoff_reply_node as _hr
+        return _hr(state)
+
+    def route_after_fact_check(state: dict) -> str:
+        return state.get("context_guard_route", "approved")
+
     def homeostasis_node(state: dict) -> dict:
         """HomeostasisNode: Percepción-Sorpresa-Restauración-Actualización.
         Detecta ausencia de tarea (incoming vacío o saludo genérico) y señala ask_task."""
@@ -328,6 +365,10 @@ def build_worker_graph(
     graph.add_node("agent", agent_node)
     graph.add_node("tools", tools_node)
     graph.add_node("set_reply", set_reply)
+    if context_guard_enabled:
+        graph.add_node("fact_check", fact_check_node)
+        graph.add_node("self_correction", self_correction_node)
+        graph.add_node("handoff_reply", handoff_reply_node)
     if getattr(spec, "homeostasis_config", None):
         graph.add_node("homeostasis", homeostasis_node)
         graph.set_entry_point("homeostasis")
@@ -335,7 +376,19 @@ def build_worker_graph(
     else:
         graph.set_entry_point("prepare")
     graph.add_edge("prepare", "agent")
-    graph.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": "set_reply"})
+    if context_guard_enabled:
+        graph.add_conditional_edges(
+            "agent", should_continue,
+            {"tools": "tools", "end": "fact_check"},
+        )
+        graph.add_conditional_edges(
+            "fact_check", route_after_fact_check,
+            {"approved": "set_reply", "correct": "self_correction", "handoff": "handoff_reply"},
+        )
+        graph.add_edge("self_correction", "fact_check")
+        graph.add_edge("handoff_reply", END)
+    else:
+        graph.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": "set_reply"})
     graph.add_edge("tools", "agent")
     graph.add_edge("set_reply", END)
 

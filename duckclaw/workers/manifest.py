@@ -87,6 +87,16 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
     if isinstance(data.get("inference"), dict):
         inference_config = data["inference"]
     homeostasis_config = _load_homeostasis_config(worker_dir, data)
+    context_guard_config = None
+    if isinstance(data.get("context_guard"), dict):
+        context_guard_config = data["context_guard"]
+    elif data.get("context_guard") is True:
+        context_guard_config = {"enabled": True, "max_retries": 2}
+    crm_config = None
+    if isinstance(data.get("crm"), dict):
+        crm_config = data["crm"]
+    elif data.get("crm") is True:
+        crm_config = {"enabled": True}
     allowed_tables = data.get("allowed_tables") or []
     if isinstance(allowed_tables, str):
         allowed_tables = [t.strip() for t in allowed_tables.split(",") if t.strip()]
@@ -109,6 +119,8 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         sft_config=sft_config,
         inference_config=inference_config,
         homeostasis_config=homeostasis_config,
+        context_guard_config=context_guard_config,
+        crm_config=crm_config,
     )
 
 
@@ -164,7 +176,7 @@ class WorkerSpec:
         "worker_id", "name", "schema_name", "llm_required", "temperature",
         "topology", "skills_list", "allowed_tables", "read_only", "worker_dir",
         "github_config", "research_config", "tailscale_config", "sft_config",
-        "inference_config", "homeostasis_config",
+        "inference_config", "homeostasis_config", "context_guard_config", "crm_config",
     )
 
     def __init__(
@@ -185,6 +197,8 @@ class WorkerSpec:
         sft_config: Optional[dict] = None,
         inference_config: Optional[dict] = None,
         homeostasis_config: Optional[dict] = None,
+        context_guard_config: Optional[dict] = None,
+        crm_config: Optional[dict] = None,
     ):
         self.worker_id = worker_id
         self.name = name
@@ -202,3 +216,5 @@ class WorkerSpec:
         self.sft_config = sft_config
         self.inference_config = inference_config
         self.homeostasis_config = homeostasis_config
+        self.context_guard_config = context_guard_config
+        self.crm_config = crm_config

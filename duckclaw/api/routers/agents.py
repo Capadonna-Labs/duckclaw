@@ -207,6 +207,40 @@ class ChatRequest(BaseModel):
     model_config = {"extra": "allow"}
 
 
+async def _enqueue_graph_lead_profiler(
+    worker_id: str, session_id: str, message: str, history: list, reply: str
+) -> None:
+    """Encola GraphLeadProfiler en ARQ (fire-and-forget). Spec: Sovereign CRM."""
+    try:
+        from arq import create_pool
+        from duckclaw.forge import AgentAssembler, WORKERS_TEMPLATES_DIR
+
+        manifest_path = WORKERS_TEMPLATES_DIR / worker_id / "manifest.yaml"
+        if not manifest_path.is_file():
+            return
+        import yaml
+        data = yaml.safe_load(manifest_path.read_text()) or {}
+        crm = data.get("crm") or {}
+        if not (crm.get("enabled") if isinstance(crm, dict) else crm):
+            return
+        from arq.connections import RedisSettings
+        redis_url = os.environ.get("REDIS_URL") or os.environ.get("ARQ_REDIS_URL", "redis://localhost:6379")
+        parts = redis_url.replace("redis://", "").split("/")[0].split(":")
+        settings = RedisSettings(host=parts[0], port=int(parts[1]) if len(parts) > 1 else 6379)
+        pool = await create_pool(settings)
+        await pool.enqueue_job(
+            "graph_lead_profiler_job",
+            worker_id,
+            session_id,
+            message,
+            history or [],
+            reply,
+        )
+        await pool.close()
+    except Exception:
+        pass
+
+
 def _get_session_status(session_id: str) -> str:
     """Estado de sesión (HITL). Retorna IDLE si Redis no disponible."""
     try:
@@ -252,6 +286,9 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
             reply = _sanitize_for_telegram(reply)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
+            asyncio.create_task(_enqueue_graph_lead_profiler(
+                worker_id, session_id, payload.message, history, reply
+            ))
             return {"response": reply, "session_id": session_id}
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc))
@@ -273,6 +310,9 @@ async def chat_with_agent(worker_id: str, payload: ChatRequest):
             reply = _sanitize_for_telegram(reply)
             _persist_turn(db, session_id, worker_id, "user", payload.message)
             _persist_turn(db, session_id, worker_id, "assistant", reply)
+            asyncio.create_task(_enqueue_graph_lead_profiler(
+                worker_id, session_id, payload.message, history, reply
+            ))
             for word in reply.split(" "):
                 yield f"data: {word} \n\n"
                 await asyncio.sleep(0.02)
