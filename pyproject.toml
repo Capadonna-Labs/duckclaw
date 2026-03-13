@@ -1,0 +1,22 @@
+# Raíz del monorepo DuckClaw — dependencias para scripts y servicios locales (p. ej. pipeline Singleton Writer)
+[project]
+name = "duckclaw"
+version = "0.0.1"
+description = "DuckClaw monorepo root — run scripts and services"
+requires-python = ">=3.9"
+dependencies = [
+    "redis>=5.0.0",
+    "duckdb>=0.10.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0.0",
+]
+
+[tool.uv]
+dev-dependencies = ["pytest>=7.0.0", "httpx>=0.25.0"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: marks tests that require Redis and full pipeline (deselect with '-m \"not integration\"')",
+]

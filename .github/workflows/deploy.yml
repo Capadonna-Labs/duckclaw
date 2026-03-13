@@ -1,7 +1,6 @@
-# Pipeline CI/CD para arquitectura distribuida
-# Spec: specs/Pipeline_de_Despliegue_Continuo_(CI_CD)_para_Arquitectura_Distribuida.md
+# CI para Singleton Writer Pipeline (sin deploy)
 
-name: Deploy
+name: CI - Singleton Writer Pipeline
 
 on:
   push:
@@ -29,124 +28,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential
 
       - name: Install dependencies
-        run: uv sync --extra agents --extra dev --extra serve
+        run: uv sync
 
-      - name: Run pytest
-        run: uv run pytest tests/ -v
-
-      - name: Run mypy
-        run: uv run mypy duckclaw/
-
-      - name: Validate SQL
-        run: uv run python scripts/validate_sql.py
-
-  deploy-mac:
-    needs: test
-    runs-on: [self-hosted, mac-mini]
-    timeout-minutes: 10
-    continue-on-error: true
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Pull latest
-        run: git pull origin main
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
-        with:
-          version: "latest"
-
-      - name: Install dependencies
-        run: uv sync --extra agents
-
-      - name: Reload PM2
-        run: pm2 reload ecosystem.core.config.cjs
-
-      - name: Health check
-        id: health
-        run: |
-          sleep 5
-          curl -sf http://localhost:8123/health || curl -sf http://localhost:8080/health || exit 1
-        continue-on-error: true
-
-      - name: Rollback on failure
-        if: steps.health.outcome == 'failure'
-        run: |
-          git checkout HEAD~1
-          uv sync --extra agents
-          pm2 reload ecosystem.core.config.cjs
-          exit 1
-
-  deploy-vps:
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check VPS secrets
-        run: |
-          missing=""
-          [ -z "${{ secrets.VPS_IP }}" ] && missing="VPS_IP "
-          [ -z "${{ secrets.VPS_USER }}" ] && missing="${missing}VPS_USER "
-          [ -z "${{ secrets.VPS_SSH_KEY }}" ] && missing="${missing}VPS_SSH_KEY"
-          if [ -n "$missing" ]; then
-            echo "::error::Missing secrets: $missing. Add them in Settings → Secrets and variables → Actions."
-            exit 1
-          fi
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        env:
-          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
-        with:
-          host: ${{ secrets.VPS_IP }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          envs: VPS_DEPLOY_PATH
-          script: |
-            cd "${VPS_DEPLOY_PATH:-$HOME/duckclaw}"
-            git pull origin main
-            
-            # Reiniciar DuckClaw
-            if systemctl --user is-active --quiet duckclaw-brain 2>/dev/null || systemctl --user is-failed --quiet duckclaw-brain 2>/dev/null; then
-              systemctl --user restart duckclaw-brain
-            fi
-            
-            # Opcional: reiniciar n8n si existe en ~/n8n
-            if [ -d "$HOME/n8n" ] && [ -f "$HOME/n8n/docker-compose.yml" ]; then
-              cd "$HOME/n8n"
-              docker compose pull && docker compose up -d
-              if systemctl is-active --quiet n8n 2>/dev/null; then
-                sudo systemctl restart n8n
-              fi
-            fi
-
-  notify:
-    needs: [deploy-mac, deploy-vps]
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Send Telegram notification
-        env:
-          NEEDS_DEPLOY_MAC: ${{ needs.deploy-mac.result }}
-          NEEDS_DEPLOY_VPS: ${{ needs.deploy-vps.result }}
-        run: |
-          COMMIT_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          MAC="${NEEDS_DEPLOY_MAC:-skipped}"
-          VPS="${NEEDS_DEPLOY_VPS:-skipped}"
-          if [ "$VPS" = "success" ]; then
-            if [ "$MAC" = "success" ]; then
-              MSG="✅ Deploy OK — commit $COMMIT_SHORT"
-            else
-              MSG="✅ Deploy VPS OK — commit $COMMIT_SHORT (mac=$MAC)"
-            fi
-          else
-            MSG="❌ Deploy falló — commit $COMMIT_SHORT (mac=$MAC vps=$VPS)"
-          fi
-          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
-            -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=$MSG" || true
+      - name: Run singleton writer pipeline integration test with logs
+        run: RUN_SINGLETON_PIPELINE_INTEGRATION=1 uv run pytest tests/run_singleton_writer_pipeline.py -v -m integration --capture=no

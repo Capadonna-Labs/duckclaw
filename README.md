@@ -31,6 +31,22 @@ duckclaw/
 - **API Gateway**: Decouples network/auth from agent logic, supporting SSE streaming.
 - **Cross-Platform CLI**: `duckops` (Python-based) manages services on Linux, Windows, and macOS.
 
+## Testing the Singleton Writer Pipeline
+
+The end-to-end flow **API Gateway → Redis → DB Writer → DuckDB** is specified in `specs/04_Singleton_Writer_Pipeline.md` and validated by:
+
+- **Unit tests** (contract + gateway behavior):
+
+  ```bash
+  uv run pytest tests/run_singleton_writer_pipeline.py -v -m "not integration"
+  ```
+
+- **Optional integration test** (requires Redis running on `localhost:6379`, e.g. `docker run -d --name duckclaw-redis -p 6379:6379 redis:7-alpine`):
+
+  ```bash
+  RUN_SINGLETON_PIPELINE_INTEGRATION=1 uv run pytest tests/run_singleton_writer_pipeline.py -v -m integration
+  ```
+
 ## Quick Start (Docker)
 
 ```bash

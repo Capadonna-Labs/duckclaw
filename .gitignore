@@ -50,3 +50,5 @@ ecosystem.*.config.cjs
 
 .cusorignore
 .cursorrules
+
+/db/
