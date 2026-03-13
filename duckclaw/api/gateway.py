@@ -113,6 +113,8 @@ async def root():
             "/api/v1/agent/chat",
             "/api/v1/agent/{worker_id}/chat",
             "/api/v1/t/{tenant_id}/agent/{worker_id}/chat",
+            "/api/v1/agent/subagents/stream",
+            "/api/v1/agent/subagents/event",
             "/api/v1/agent/{worker_id}/media/{thread_id}",
             "/api/v1/agent/{worker_id}/history",
             "/api/v1/quotes/download/{quote_id}",

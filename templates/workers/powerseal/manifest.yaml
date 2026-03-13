@@ -15,6 +15,7 @@ skills:
   - search_products
   - quote_engine
   - document_dispatcher
+  - subagents_indicator
 context_guard:
   enabled: true
   max_retries: 2

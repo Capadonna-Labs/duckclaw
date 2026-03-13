@@ -127,6 +127,15 @@ def build_general_graph(
         except Exception:
             pass
 
+    # ContextHubBridge — Ground Truth de APIs externas opcional vía tools_spec
+    if "context_hub_bridge" in tool_names_set:
+        try:
+            from duckclaw.forge.skills.context_hub_bridge import register_context_hub_skill
+
+            register_context_hub_skill(tools, {"enabled": True})
+        except Exception:
+            pass
+
     llm_with_tools = llm.bind_tools(tools)
     llm_with_required_tool = llm.bind_tools(tools, tool_choice="required")
     tools_by_name = {t.name: t for t in tools}

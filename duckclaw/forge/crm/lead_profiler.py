@@ -169,3 +169,69 @@ Chat:
             pass
 
     return inserted
+
+
+def record_learned_workaround(
+    db: Any,
+    agent_id: str,
+    api_name: str,
+    error_pattern: str,
+    fix: str,
+) -> bool:
+    """
+    Registra un patrón LEARNED_WORKAROUND en PGQ reutilizando memory_nodes y memory_edges.
+
+    Modelo lógico (sin crear tablas nuevas):
+    - Nodo origen: (Agent {id: agent_id})
+    - Nodo destino: (API {name: api_name})
+    - Arista: [:LEARNED_WORKAROUND {error_pattern: ..., fix: ...}]
+    """
+    if not ensure_crm_graph_schema(db):
+        return False
+    if not _crm_pgq_available(db):
+        # Aunque PGQ no esté cargado, seguimos usando las tablas relacionales;
+        # otro proceso puede recrear el grafo property desde ellas.
+        pass
+
+    agent_id = (agent_id or "").strip() or "unknown_agent"
+    api_name = (api_name or "").strip() or "unknown_api"
+    error_pattern = (error_pattern or "").strip()
+    fix = (fix or "").strip()
+    if not error_pattern or not fix:
+        return False
+
+    agent_node_id = _safe_esc(agent_id)
+    api_node_id = _safe_esc(api_name)
+    agent_props = _safe_esc(json.dumps({"id": agent_id}))
+    api_props = _safe_esc(json.dumps({"name": api_name}))
+    edge_id = f"{agent_node_id}_LEARNED_WORKAROUND_{api_node_id}"[:128].replace("'", "''")
+    edge_props = _safe_esc(json.dumps({"error_pattern": error_pattern, "fix": fix}))
+
+    try:
+        db.execute(
+            f"""
+            INSERT INTO memory_nodes (node_id, label, properties)
+            VALUES ('{agent_node_id}', 'Agent', '{agent_props}')
+            ON CONFLICT (node_id) DO UPDATE
+            SET label = EXCLUDED.label, properties = EXCLUDED.properties
+            """
+        )
+        db.execute(
+            f"""
+            INSERT INTO memory_nodes (node_id, label, properties)
+            VALUES ('{api_node_id}', 'API', '{api_props}')
+            ON CONFLICT (node_id) DO UPDATE
+            SET label = EXCLUDED.label, properties = EXCLUDED.properties
+            """
+        )
+        db.execute(
+            f"""
+            INSERT INTO memory_edges (edge_id, source_id, target_id, relationship, weight, properties)
+            VALUES ('{edge_id}', '{agent_node_id}', '{api_node_id}', 'LEARNED_WORKAROUND', 1.0, '{edge_props}')
+            ON CONFLICT (edge_id) DO UPDATE
+            SET properties = EXCLUDED.properties, weight = memory_edges.weight + 0.1
+            """
+        )
+        return True
+    except Exception:
+        return False

@@ -52,6 +52,140 @@ async def clear_graph_cache():
 _graph_cache: dict[str, Any] = {}
 
 
+# --- Subagent SSE bus: in-memory por proceso (Angular Wizard Interface) ---
+
+_subagent_channels: dict[str, set[asyncio.Queue[str]]] = {}
+
+
+class SubagentTask(BaseModel):
+    task_id: str
+    label: str
+    status: str
+
+
+class SubagentEvent(BaseModel):
+    """
+    Evento SSE para el ParallelTaskIndicatorComponent de Angular.
+
+    event:
+      - subagents_started
+      - subagents_updated
+      - subagents_finished
+    """
+
+    event: str = Field(..., description="Tipo de evento SSE (subagents_started|subagents_updated|subagents_finished).")
+    correlation_id: str = Field(..., description="ID de correlación/sesión (session_id / thread_id).")
+    user_id: Optional[str] = Field(None, description="ID del usuario (por ejemplo, telegram_user_id).")
+    worker_id: Optional[str] = Field(None, description="Worker asociado (finanz, powerseal, etc.).")
+    tasks: list[SubagentTask] = Field(default_factory=list, description="Lista de tareas paralelas.")
+    total_parallel_tasks: Optional[int] = Field(
+        None,
+        description="Número total de tareas paralelas (si se omite, se infiere de len(tasks)).",
+    )
+
+
+def _get_or_create_subagent_channel(session_id: str) -> asyncio.Queue[str]:
+    """
+    Crea (o reutiliza) un canal para la sesión dada.
+    """
+    sid = session_id.strip() or "default"
+    q: asyncio.Queue[str] = asyncio.Queue()
+    if sid not in _subagent_channels:
+        _subagent_channels[sid] = set()
+    _subagent_channels[sid].add(q)
+    return q
+
+
+def _remove_subagent_channel(session_id: str, q: asyncio.Queue[str]) -> None:
+    sid = session_id.strip() or "default"
+    channels = _subagent_channels.get(sid)
+    if not channels:
+        return
+    channels.discard(q)
+    if not channels:
+        _subagent_channels.pop(sid, None)
+
+
+async def _publish_subagent_event(event: SubagentEvent) -> None:
+    """
+    Publica un evento de subagentes en todos los canales asociados al correlation_id.
+    """
+    sid = (event.correlation_id or "").strip() or "default"
+    channels = list(_subagent_channels.get(sid) or [])
+    if not channels:
+        return
+    payload = event.model_dump()
+    if not payload.get("total_parallel_tasks"):
+        payload["total_parallel_tasks"] = len(payload.get("tasks") or [])
+    data = json.dumps(payload, ensure_ascii=False)
+    for q in channels:
+        # No bloquear; si el consumidor se retrasó, dejar que la cola crezca un poco
+        try:
+            q.put_nowait(data)
+        except Exception:
+            # Si la cola está llena o el consumidor murió, ignorar silenciosamente
+            continue
+
+
+@router.get(
+    "/subagents/stream",
+    summary="SSE de subagentes para Angular (ParallelTaskIndicator)",
+)
+async def stream_subagents(session_id: str):
+    """
+    Endpoint SSE que emite eventos JSON de subagentes:
+
+    - subagents_started
+    - subagents_updated
+    - subagents_finished
+
+    El cliente Angular debe suscribirse con un EventSource apuntando a:
+      /api/v1/agent/subagents/stream?session_id=...
+    y parsear cada `event.data` como JSON.
+    """
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        q = _get_or_create_subagent_channel(session_id)
+        try:
+            # Mensaje inicial opcional para handshake
+            hello = json.dumps(
+                {
+                    "event": "subagents_hello",
+                    "correlation_id": session_id,
+                    "message": "Subagent SSE stream connected.",
+                },
+                ensure_ascii=False,
+            )
+            yield f"data: {hello}\n\n"
+            while True:
+                try:
+                    data = await q.get()
+                except asyncio.CancelledError:
+                    break
+                yield f"data: {data}\n\n"
+        finally:
+            _remove_subagent_channel(session_id, q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@router.post(
+    "/subagents/event",
+    summary="Publicar evento de subagentes (para SubAgentSpawner / workers)",
+)
+async def emit_subagent_event(event: SubagentEvent):
+    """
+    Permite que el backend (SubAgentSpawner, workers, jobs) publique eventos
+    que serán consumidos por la interfaz Angular vía SSE.
+    """
+    await _publish_subagent_event(event)
+    return {"ok": True}
+
+
 def _get_db() -> Any:
     """DuckDB para api_conversation y workers."""
     from duckclaw import DuckClaw
