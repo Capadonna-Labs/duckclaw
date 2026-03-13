@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duckclaw-shared"
+version = "0.1.0"
+description = "Shared utilities and integrations for DuckClaw"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.28.0",
+    "langchain-core>=0.3.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["duckclaw.shared"]

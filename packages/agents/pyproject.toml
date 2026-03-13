@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duckclaw-agents"
+version = "0.1.0"
+description = "LangGraph agents and workers for DuckClaw"
+requires-python = ">=3.9"
+dependencies = [
+    "langgraph>=0.2.0",
+    "duckclaw-core",
+    "duckclaw-shared",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["duckclaw.agents", "duckclaw.workers", "duckclaw.skills", "duckclaw.forge"]
