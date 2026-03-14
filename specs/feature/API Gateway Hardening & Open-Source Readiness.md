@@ -86,9 +86,10 @@ Para que un usuario en Windows, Linux o macOS pueda levantar el Gateway sin fric
 El `api-gateway` **no debe importar `mlx` directamente**. MLX es exclusivo de Apple Silicon. El Gateway debe comunicarse con el motor de inferencia a través de interfaces abstractas (definidas en `packages/shared/`). Si el usuario está en Windows/Linux, el Gateway enrutará la petición a `llama.cpp` o a una API externa (Groq/OpenAI) según la configuración, sin fallar en tiempo de importación.
 
 ### B. CLI de Inicialización (`duckops`)
-Añadir comandos al CLI para facilitar el *onboarding* de nuevos usuarios open-source:
+Comandos del CLI para facilitar el *onboarding* de nuevos usuarios open-source:
 *   `uv run duckops init`: Genera el `.env` con claves criptográficas seguras automáticamente (`openssl rand -hex 32`).
-*   `uv run duckops serve --gateway`: Levanta el servidor Uvicorn detectando el SO automáticamente.
+*   `uv run duckops serve --gateway`: Levanta el servidor Uvicorn (`duckclaw.api.gateway`) detectando el SO automáticamente.
+*   `uv run duckops serve --pm2 --gateway`: Genera `ecosystem.api.config.cjs` y despliega el Gateway en PM2 como `DuckClaw-Gateway`. Carga `.env` de la raíz para propagar `DUCKCLAW_LLM_PROVIDER`, `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `DUCKCLAW_DB_PATH`, etc., evitando "Connection refused" cuando el proveedor por defecto (mlx) no está disponible. El wizard (`duckops init`) escribe `DUCKCLAW_DB_PATH` en `.env` al guardar la configuración.
 
 ## 6. Contrato de Integración (Endpoints Core)
 

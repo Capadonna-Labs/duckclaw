@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 # --write-systemd: generar unidad systemd sin importar Rich (salida temprana)
 if "--write-systemd" in sys.argv:
-    _repo = Path(__file__).resolve().parent.parent
+    _repo = Path(__file__).resolve().parent.parent.parent.parent  # monorepo root
     sys.path.insert(0, str(_repo))
     for _base in (Path.cwd(), _repo):
         _env = _base / ".env"
@@ -126,8 +126,10 @@ def _config_path() -> Path:
 
 
 def _load_dotenv() -> None:
-    """Carga .env en os.environ si existe (busca en cwd y en la raíz del repo)."""
-    for base in (Path.cwd(), Path(__file__).resolve().parent.parent):
+    """Carga .env en os.environ si existe (busca en cwd y en la raíz del monorepo)."""
+    _script_dir = Path(__file__).resolve().parent
+    _repo_root = _script_dir.parent.parent.parent.parent  # packages/shared/scripts -> ../../../..
+    for base in (Path.cwd(), _repo_root, _script_dir.parent):
         env_file = base / ".env"
         if env_file.is_file():
             try:
@@ -162,6 +164,21 @@ def _valid_db_path(db_path: Any) -> bool:
     return s.endswith(".duckdb") or ".duckdb" in s or "/" in s or s == "telegram.duckdb"
 
 
+def _normalize_db_to_db_folder(raw: str, repo_root: Path) -> str:
+    """Normaliza la ruta de BD: extrae el nombre del archivo y devuelve db/<nombre>.duckdb."""
+    s = (raw or "").strip()
+    if not s or not _valid_db_path(s):
+        return "db/telegram.duckdb"
+    # Si ya está en db/<algo>, mantener (puede ser db/finanz.duckdb)
+    if s.replace("\\", "/").startswith("db/"):
+        return s
+    # Extraer nombre del archivo (ej. finanz.duckdb desde /path/to/finanz.duckdb)
+    name = Path(s).name
+    if not name.lower().endswith(".duckdb"):
+        name = name + ".duckdb" if name else "telegram.duckdb"
+    return f"db/{name}"
+
+
 def load_config() -> dict[str, Any] | None:
     """Carga preferencias desde ~/.config/duckclaw/wizard_config.json. Siempre revisar primero antes de configurar desde 0."""
     path = _config_path()
@@ -177,7 +194,11 @@ def load_config() -> dict[str, Any] | None:
                 continue
             v = data[k]
             if k == "db_path":
-                out["db_path"] = v if _valid_db_path(v) else "telegram.duckdb"
+                env_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
+                if env_db and _valid_db_path(env_db):
+                    out["db_path"] = env_db
+                else:
+                    out["db_path"] = v if _valid_db_path(v) else "telegram.duckdb"
             elif k in ("save_grpo_traces", "send_to_langsmith"):
                 out[k] = bool(v) if isinstance(v, bool) else str(v).strip().lower() in ("true", "1", "yes", "y", "sí", "si")
             else:
@@ -332,13 +353,17 @@ def _edit_service_settings(
         border_style="cyan",
     ))
 
-    # ── Mostrar config actual ──────────────────────────────────────────
+    # ── Mostrar config actual (prioridad: .env → state, .env es lo que usa el Gateway)
+    env_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip() or None
+    cur_db_display = _normalize_db_to_db_folder(
+        env_db or state.get("db_path") or "telegram.duckdb", repo_root
+    )
     cur = Table(title="Configuración actual", border_style="dim")
     cur.add_column("Parámetro", style="dim cyan")
     cur.add_column("Valor", style="white")
     cur.add_row(f"Nombre app {provider}", service_name)
     cur.add_row("Modo bot", state.get("bot_mode", "langgraph"))
-    cur.add_row("DB path", state.get("db_path", "telegram.duckdb"))
+    cur.add_row("DB path", cur_db_display)
     cur.add_row("Proveedor LLM", state.get("llm_provider") or "none_llm")
     cur.add_row("Modelo LLM", state.get("llm_model") or "-")
     cur.add_row("Token", _censor_token(state.get("token", "")) or "(usa TELEGRAM_BOT_TOKEN de .env)")
@@ -364,9 +389,13 @@ def _edit_service_settings(
     new_mode = mode_map.get(mode_choice, "langgraph")
     state["bot_mode"] = new_mode
 
-    # ── DB path ──────────────────────────────────────────────────────
-    cur_db = state.get("db_path", "telegram.duckdb")
-    new_db = Prompt.ask("Ruta DB (DuckDB)", default=cur_db).strip() or cur_db
+    # ── DB path (prioridad: .env → state, .env es lo que usa el Gateway)
+    env_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip() or None
+    cur_db = _normalize_db_to_db_folder(
+        env_db or state.get("db_path") or "telegram.duckdb", repo_root
+    )
+    new_db_raw = Prompt.ask("Ruta DB (DuckDB)", default=cur_db).strip() or cur_db
+    new_db = _normalize_db_to_db_folder(new_db_raw, repo_root)
     state["db_path"] = new_db
 
     # ── Token ────────────────────────────────────────────────────────
@@ -410,11 +439,26 @@ def _edit_service_settings(
         summary.add_row("URL base LLM", new_url or "-")
     console.print(summary)
 
+    # Persistir siempre (wizard_config.json + .env) para que la próxima vez recuerde la última BD
+    save_config(
+        mode=state.get("mode", "quick"),
+        channel=state.get("channel", "telegram"),
+        bot_mode=new_mode,
+        db_path=new_db,
+        llm_provider=new_provider,
+        llm_model=new_model,
+        llm_base_url=new_url,
+        save_grpo_traces=state.get("save_grpo_traces", False),
+        send_to_langsmith=state.get("send_to_langsmith", False),
+    )
+    _write_env_file(repo_root, "DUCKCLAW_DB_PATH", new_db)
+    _ensure_db_file_exists(repo_root, new_db, console)
+
     if provider == "pm2":
         # ── Generar ecosystem.core.config.cjs ────────────────────────────
         if not Confirm.ask("¿Generar/actualizar ecosystem.core.config.cjs?", default=True):
             return
-    
+
         config_path = repo_root / "ecosystem.core.config.cjs"
         cwd = str(repo_root)
         config_content = f"""/**
@@ -449,7 +493,6 @@ module.exports = {{
         console.print(f"[green]✓[/] Config generado: [dim]{config_path}[/]")
     else:
         # Systemd: guardar variables en .env
-        _write_env_file(repo_root, "DUCKCLAW_DB_PATH", new_db)
         _write_env_file(repo_root, "DUCKCLAW_BOT_MODE", new_mode)
         _write_env_file(repo_root, "DUCKCLAW_LLM_PROVIDER", new_provider)
         _write_env_file(repo_root, "DUCKCLAW_LLM_MODEL", new_model)
@@ -510,6 +553,33 @@ def _write_env_file(repo_root: Path, key: str, value: str) -> None:
     if not found:
         lines.append(f"{key}={value}")
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _ensure_db_file_exists(repo_root: Path, db_path: str, console: Console | None = None) -> bool:
+    """Crea el archivo .duckdb en db/ si no existe. Devuelve True si se creó o ya existía."""
+    if not db_path or not _valid_db_path(db_path):
+        return False
+    p = Path(db_path)
+    if not p.is_absolute():
+        p = (repo_root / p).resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.exists():
+        return True
+    _orig_path = sys.path.copy()
+    try:
+        sys.path.insert(0, str(repo_root))
+        from duckclaw import DuckClaw
+        _db = DuckClaw(str(p))
+        _db.execute("SELECT 1")
+        if console:
+            console.print(f"[green]✓[/] BD creada: [dim]{p}[/]")
+        return True
+    except Exception as e:
+        if console:
+            console.print(f"[yellow]⚠[/] No se pudo crear la BD en {p}: {e}")
+        return False
+    finally:
+        sys.path[:] = _orig_path
 
 
 def _status_style(status: str) -> str:
@@ -922,15 +992,18 @@ def _run_section(
 
     if section_id == "db_path":
         console.print(Panel("Ruta de la base de datos", title="DB", border_style="cyan"))
+        console.print("[dim]Se guardará en db/ con el mismo nombre. Ej: finanz.duckdb → db/finanz.duckdb[/]")
         # Prioridad: última ruta guardada en config (JSON) → env DUCKCLAW_DB_PATH → fallback
         saved_path = state.get("db_path") if _valid_db_path(state.get("db_path")) else None
         env_path = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip() or None
-        default_db = saved_path or env_path or "telegram.duckdb"
+        # Normalizar a db/<nombre> para la sugerencia (última usada)
+        default_db = _normalize_db_to_db_folder(saved_path or env_path or "telegram.duckdb", repo_root)
         val, nav = _prompt_with_nav(console, "DUCKCLAW_DB_PATH", default=default_db)
         if nav:
             return True, "", nav
         raw = (val or "").strip() or "telegram.duckdb"
-        state["db_path"] = raw if _valid_db_path(raw) else "telegram.duckdb"
+        state["db_path"] = _normalize_db_to_db_folder(raw, repo_root)
+        _ensure_db_file_exists(repo_root, state["db_path"], console)
         return True, "", None
 
     if section_id == "grpo_traces":
@@ -1020,9 +1093,11 @@ def _run_section(
         console.print(Panel("Guardar y lanzar", title="Finalizar", border_style="green"))
         if not state.get("_used_preferences_skip"):
             if Confirm.ask("¿Guardar esta configuración para la próxima vez?", default=True):
-                db_path_save = state.get("db_path", "telegram.duckdb")
+                db_path_save = _normalize_db_to_db_folder(
+                    state.get("db_path", "telegram.duckdb"), repo_root
+                )
                 if not _valid_db_path(db_path_save):
-                    db_path_save = "telegram.duckdb"
+                    db_path_save = "db/telegram.duckdb"
                 save_tr = state.get("save_grpo_traces", False)
                 if isinstance(save_tr, str):
                     save_tr = str(save_tr).lower() in ("true", "1", "yes", "y", "sí", "si")
@@ -1040,6 +1115,8 @@ def _run_section(
                     save_grpo_traces=save_tr,
                     send_to_langsmith=send_ls,
                 )
+                _write_env_file(repo_root, "DUCKCLAW_DB_PATH", db_path_save)
+                _ensure_db_file_exists(repo_root, db_path_save, console)
         state.pop("_used_preferences_skip", None)
         console.print()
         available_providers = _detect_available_deploy_providers()
@@ -1198,8 +1275,9 @@ def main() -> int:
     except Exception:
         w = 100
     console = Console(width=w)
-    repo_root = Path(__file__).resolve().parent.parent
-    bot_script = repo_root / "examples" / "telegram_bot.py"
+    # Raíz del monorepo (packages/shared/scripts -> ../../../)
+    repo_root = Path(__file__).resolve().parent.parent.parent.parent
+    bot_script = repo_root / "packages" / "agents" / "src" / "duckclaw" / "agents" / "telegram_bot.py"
 
     try:
       return _main_inner(console, repo_root, bot_script)

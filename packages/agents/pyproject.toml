@@ -15,4 +15,4 @@ dependencies = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["duckclaw.agents", "duckclaw.workers", "duckclaw.skills", "duckclaw.forge"]
+packages = ["duckclaw.agents", "duckclaw.workers", "duckclaw.skills", "duckclaw.forge", "duckclaw.api"]

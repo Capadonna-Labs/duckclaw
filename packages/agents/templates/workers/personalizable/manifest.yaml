@@ -1,0 +1,11 @@
+# Personalizable — rol por defecto para armar con /prompt, /skills y /goals
+# Sin plantilla fija: el usuario configura system prompt, capacidades y objetivos.
+name: Personalizable
+id: personalizable
+schema_name: personalizable_worker
+topology: general
+read_only: false
+llm:
+  required: true
+  temperature: 0.3
+skills: []  # run_sql, inspect_schema, manage_memory por defecto

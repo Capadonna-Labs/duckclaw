@@ -625,11 +625,14 @@ def _execute_tool_calls_and_compose(
     tool_calls: list[dict[str, Any]],
 ) -> str:
     """Ejecuta las tool-calls y compone la respuesta final en lenguaje natural."""
+    import logging
+    _log = logging.getLogger(__name__)
     by_name = {t.name: t for t in tools}
     results: list[str] = []
     for tc in tool_calls:
         name = tc.get("tool", "")
         args = tc.get("args") or {}
+        _log.info("tool_use: %s %s", name, json.dumps(args, default=str)[:200])
         if name not in by_name:
             results.append(f"Herramienta desconocida: {name}")
             continue

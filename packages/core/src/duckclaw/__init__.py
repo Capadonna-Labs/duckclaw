@@ -1,6 +1,16 @@
 """DuckClaw Python package facade over the native C++ extension."""
 
 from pathlib import Path
+import pkgutil
+
+# Merge duckclaw namespace (core + shared + agents: integrations, utils, gateway_db, etc.)
+# Exclude root duckclaw/ (monorepo dev layout) so duckclaw.forge comes from agents
+_extended = pkgutil.extend_path(__path__, __name__)
+__path__ = [p for p in _extended if "packages/core" in p or "packages/shared" in p or "packages/agents" in p]
+# Agents uses finder, not path; add agents/duckclaw for gateway_db, etc.
+_agents_duckclaw = Path(__file__).resolve().parents[3] / "agents" / "src" / "duckclaw"
+if _agents_duckclaw.exists():
+    __path__.append(str(_agents_duckclaw))
 
 import warnings
 

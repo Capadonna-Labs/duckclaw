@@ -533,8 +533,16 @@ def build_worker_graph(
 
 def list_workers(templates_root: Optional[Path] = None) -> list[str]:
     """Return worker_id for each template in templates/workers/."""
-    root = templates_root or Path(__file__).resolve().parent.parent.parent
-    workers_dir = root / "templates" / "workers"
+    if templates_root is not None:
+        workers_dir = templates_root / "templates" / "workers"
+    else:
+        try:
+            from duckclaw.forge import WORKERS_TEMPLATES_DIR
+            workers_dir = WORKERS_TEMPLATES_DIR
+        except ImportError:
+            # packages/agents/src/duckclaw/workers -> packages/agents
+            root = Path(__file__).resolve().parent.parent.parent.parent
+            workers_dir = root / "templates" / "workers"
     if not workers_dir.is_dir():
         return []
     return [d.name for d in workers_dir.iterdir() if d.is_dir() and (d / "manifest.yaml").is_file()]

@@ -9,10 +9,16 @@ import os
 
 
 def _find_templates_root() -> Path:
-    """Project root: duckclaw/workers -> project root."""
+    """Project root: packages/agents/templates/workers/."""
     here = Path(__file__).resolve().parent
-    # duckclaw/workers -> project has templates/ at root
-    for parent in (here.parent.parent, here.parent.parent.parent, Path.cwd()):
+    # duckclaw/workers -> packages/agents (4 levels up)
+    candidates = [
+        here.parent.parent.parent.parent,  # packages/agents
+        here.parent.parent.parent,         # packages/agents/src
+        Path.cwd(),
+        Path.cwd() / "packages" / "agents",
+    ]
+    for parent in candidates:
         d = parent / "templates" / "workers"
         if d.is_dir():
             return parent

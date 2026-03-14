@@ -83,7 +83,8 @@ Integración Angular: EventSource a SSE de chat y subagentes; polling a `/homeos
 
 ## 4. Despliegue y persistencia (PM2 / Docker)
 
-- **Local/Híbrido**: PM2 para `DuckClaw-Brain` (bot) y `DuckClaw-Inference` (MLX). Config en `config/` (p. ej. `ecosystem.core.config.cjs`).
+- **Local/Híbrido**: PM2 para `DuckClaw-Brain` (bot), `DuckClaw-Gateway` (API para n8n/Telegram) y `DuckClaw-Inference` (MLX). Config generado por `duckops serve --pm2 --gateway` → `ecosystem.api.config.cjs`.
+- **DuckClaw-Gateway**: Usa `duckclaw.api.gateway:app`. Requiere variables de entorno para el LLM (`DUCKCLAW_LLM_PROVIDER`, `DEEPSEEK_API_KEY` o `OPENAI_API_KEY`, etc.) y para la BD (`DUCKCLAW_DB_PATH`, normalizada a `db/<nombre>.duckdb` por el wizard). El manager carga `.env` de la raíz al generar el config para propagarlas a PM2.
 - **Contenerización**: Docker multi-etapa (`docker/base/`, `docker/api/`) para aislamiento y K8s.
 
 ---

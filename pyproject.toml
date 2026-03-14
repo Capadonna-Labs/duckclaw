@@ -11,7 +11,18 @@ dependencies = [
     "uvicorn[standard]>=0.27.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0.0",
+    "duckops",
+    "duckclaw-agents",
+    "duckclaw-core",
+    "duckclaw-shared",
+    "langchain-openai>=0.3.35",
 ]
+
+[tool.uv.sources]
+duckops = { path = "packages/duckops", editable = true }
+duckclaw-agents = { path = "packages/agents", editable = true }
+duckclaw-core = { path = "packages/core", editable = true }
+duckclaw-shared = { path = "packages/shared", editable = true }
 
 [tool.uv]
 dev-dependencies = ["pytest>=7.0.0", "httpx>=0.25.0"]

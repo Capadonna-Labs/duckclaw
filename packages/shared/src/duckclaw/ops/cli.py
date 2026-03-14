@@ -14,9 +14,11 @@ def cli():
 def serve(port):
     """Start the DuckClaw API Gateway"""
     click.echo(f"Starting API Gateway on port {port}...")
-    # Cross-platform way to run uvicorn
     try:
-        subprocess.run(["uvicorn", "duckclaw.api.gateway:app", "--host", "0.0.0.0", "--port", str(port)], check=True)
+        subprocess.run(
+            ["uvicorn", "duckclaw.api.gateway:app", "--host", "0.0.0.0", "--port", str(port)],
+            check=True,
+        )
     except Exception as e:
         click.echo(f"Error starting server: {e}")
 

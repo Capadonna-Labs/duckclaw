@@ -326,6 +326,15 @@ def get_graph() -> Any:
     return _graph_state["graph"]
 
 
+def get_db() -> Any:
+    """Devuelve la instancia DuckClaw del grafo (para fly commands en el Gateway)."""
+    if _graph_state.get("db") is None:
+        if _graph_init_error is not None:
+            raise _graph_init_error
+        _get_or_build_graph()
+    return _graph_state.get("db")
+
+
 # ── __main__ ───────────────────────────────────────────────────────────────────
 
 def _run_server(host: str = "0.0.0.0", port: int = 8123, reload: bool = False) -> None:

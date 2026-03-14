@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 from duckclaw.agents.tools import run_sql, inspect_schema, manage_memory
 
@@ -180,6 +184,7 @@ def build_general_graph(
             name = (tc.get("name") or "").strip()
             args = tc.get("args") or {}
             tid = tc.get("id") or ""
+            _log.info("tool_use: %s %s", name, json.dumps(args, default=str)[:200])
             tool = tools_by_name.get(name)
             if tool:
                 try:

@@ -14,4 +14,4 @@ dependencies = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["duckclaw.shared"]
+packages = ["duckclaw", "duckclaw.integrations", "duckclaw.utils", "duckclaw.bi", "duckclaw.ops", "duckclaw.ops.providers"]

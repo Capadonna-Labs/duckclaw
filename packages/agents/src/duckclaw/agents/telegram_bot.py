@@ -386,6 +386,7 @@ def _run_bot() -> None:
             _log(f"🤔 [{display_model}] pensando...")
 
             from duckclaw.agents.on_the_fly_commands import (
+                append_task_audit,
                 get_chat_state,
                 get_history_limit_for_chat,
                 get_worker_id_for_chat,
@@ -395,7 +396,13 @@ def _run_bot() -> None:
             worker_id = get_worker_id_for_chat(self.db, chat_id)
             use_rag = get_chat_state(self.db, chat_id, "use_rag") != "false"
 
+            try:
+                from duckclaw.agents.activity import set_busy, set_idle
+                set_busy(chat_id, task=text)
+            except Exception:
+                pass
             t0 = time.perf_counter()
+            task_success = True
             try:
                 graph = _build_graph_via_forge(
                     self.db,
@@ -421,10 +428,18 @@ def _run_bot() -> None:
                 reply = result.get("reply") or ""
             except RuntimeError as e:
                 reply = str(e)
+                task_success = False
             except Exception as e:
                 reply = f"Error del agente: {e}"
+                task_success = False
                 import traceback
                 traceback.print_exc()
+            finally:
+                try:
+                    from duckclaw.agents.activity import set_idle
+                    set_idle(chat_id)
+                except Exception:
+                    pass
             reply = _normalize_reply(reply) or ""
             if use_rag and reply and text:
                 try:
@@ -437,6 +452,14 @@ def _run_bot() -> None:
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             try:
                 save_last_audit(self.db, chat_id, elapsed_ms)
+                append_task_audit(
+                    self.db,
+                    chat_id,
+                    worker_id or "",
+                    text,
+                    "SUCCESS" if task_success else "FAILED",
+                    elapsed_ms,
+                )
             except Exception:
                 pass
             reply_for_user = reply

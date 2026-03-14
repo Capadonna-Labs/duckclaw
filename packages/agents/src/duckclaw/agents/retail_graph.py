@@ -47,6 +47,9 @@ def build_retail_graph(
         return {"messages": messages + [response]}
 
     def tools_node(state: dict) -> dict:
+        import json
+        import logging
+        _log = logging.getLogger(__name__)
         messages = state.get("messages") or []
         last = messages[-1]
         tool_calls = getattr(last, "tool_calls", None) or []
@@ -55,6 +58,7 @@ def build_retail_graph(
             name = tc.get("name") or ""
             args = tc.get("args") or {}
             tid = tc.get("id") or ""
+            _log.info("tool_use: %s %s", name, json.dumps(args, default=str)[:200])
             tool = tools_by_name.get(name)
             if tool:
                 try:

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duckops"
+version = "0.1.0"
+description = "DuckClaw CLI — Wizard, deploy y auditoría Habeas Data"
+requires-python = ">=3.9"
+dependencies = [
+    "typer>=0.9.0",
+    "rich>=13.0.0",
+    "pydantic>=2.0",
+    "duckclaw-shared",
+]
+
+[project.scripts]
+duckops = "duckops.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["duckops", "duckops.*"]
