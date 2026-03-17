@@ -16,4 +16,4 @@ dependencies = [
 [tool.setuptools]
 package-dir = {"" = "src"}
 # duckclaw.graphs (src/duckclaw/graphs), duckclaw.workers, duckclaw.forge (forge/skills en forge)
-packages = ["duckclaw.graphs", "duckclaw.workers", "duckclaw.forge"]
+packages = ["duckclaw.graphs", "duckclaw.workers", "duckclaw.forge", "duckclaw.api"]

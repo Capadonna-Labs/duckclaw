@@ -52,4 +52,5 @@ ecosystem.*.config.cjs
 .cursorrules
 
 /db/
+packages/agents/train/conversation_traces/
 dump.rdb
