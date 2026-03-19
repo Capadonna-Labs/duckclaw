@@ -9,6 +9,7 @@ Endpoints: /api/v1/agent/chat, /api/v1/db/write, homeostasis, system health.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -32,6 +33,8 @@ from pydantic import BaseModel, Field
 import redis.asyncio as redis
 
 from core.models import ChatRequest
+from duckclaw.vaults import ensure_registry as ensure_vault_registry
+from duckclaw.vaults import resolve_active_vault, validate_user_db_path
 
 # Cargar .env desde repo root
 _repo_root = Path(__file__).resolve().parent.parent.parent
@@ -79,6 +82,57 @@ CREATE TABLE IF NOT EXISTS main.authorized_users (
 );
 """
 
+# ANSI colors (foreground). Kept readable on dark terminals.
+_CHAT_COLORS = (
+    "\033[38;5;39m",   # blue
+    "\033[38;5;45m",   # cyan
+    "\033[38;5;82m",   # green
+    "\033[38;5;190m",  # yellow
+    "\033[38;5;208m",  # orange
+    "\033[38;5;201m",  # magenta
+    "\033[38;5;135m",  # purple
+    "\033[38;5;51m",   # aqua
+)
+_ANSI_RESET = "\033[0m"
+
+
+def _chat_color(chat_id: str) -> str:
+    cid = (chat_id or "default").encode("utf-8", errors="ignore")
+    idx = int(hashlib.sha1(cid).hexdigest(), 16) % len(_CHAT_COLORS)
+    return _CHAT_COLORS[idx]
+
+
+def _c_chat(chat_id: str, text: str) -> str:
+    """Colorize text by chat_id for PM2/terminal readability."""
+    return f"{_chat_color(chat_id)}{text}{_ANSI_RESET}"
+
+
+def _c_chat_id(chat_id: str) -> str:
+    """Colorize only chat_id value."""
+    cid = repr(chat_id)
+    return f"{_chat_color(chat_id)}{cid}{_ANSI_RESET}"
+
+
+def _normalize_local_artifacts_to_db() -> None:
+    """Mueve artefactos locales conocidos a `db/` si aparecen en la raíz."""
+    try:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        db_dir = repo_root / "db"
+        db_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("SELECT", "dump.rdb"):
+            src = repo_root / filename
+            dst = db_dir / filename
+            if src.exists():
+                try:
+                    if dst.exists():
+                        src.unlink(missing_ok=True)
+                    else:
+                        src.replace(dst)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 
 def _langsmith_auth_log(*, auth_status: str, user_id: str, tenant_id: str) -> None:
     """
@@ -114,6 +168,15 @@ def _langsmith_auth_log(*, auth_status: str, user_id: str, tenant_id: str) -> No
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.redis = redis.from_url(str(settings.REDIS_URL), decode_responses=True)
+    _normalize_local_artifacts_to_db()
+    # Forzar que Redis persista dump.rdb dentro de db/ (best-effort).
+    try:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        redis_dir = str((repo_root / "db").resolve())
+        await app.state.redis.config_set("dir", redis_dir)
+        await app.state.redis.config_set("dbfilename", "dump.rdb")
+    except Exception:
+        pass
     # Prepara el esquema de Telegram Guard (idempotente).
     try:
         # Importante: reutilizar la misma conexión DuckDB que mantiene graph_server
@@ -135,6 +198,10 @@ async def lifespan(app: FastAPI):
         )
     except Exception as exc:
         _gateway_log.warning("Telegram Guard: no se pudo inicializar authorized_users: %s", exc)
+    try:
+        ensure_vault_registry()
+    except Exception as exc:
+        _gateway_log.warning("Multi-Vault: no se pudo inicializar user_vaults: %s", exc)
     yield
     await app.state.redis.aclose()
 
@@ -485,7 +552,7 @@ async def agent_chat(
         )
     else:
         _gateway_log.info(
-            "[session] chat_id resolved: %r (source=%s)", session_id, session_source
+            f"[session] chat_id resolved: {_c_chat_id(session_id)} (source={session_source})"
         )
     tenant_id = (body.tenant_id or "default").strip() or "default"
     return await _invoke_chat(body, worker_id or "finanz", session_id=session_id, tenant_id=tenant_id)
@@ -536,10 +603,12 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     chat_type = (payload.chat_type or "private").strip().lower() or "private"
     username = (payload.username or "Usuario").strip() or "Usuario"
     user_id = (payload.user_id or "").strip()
+    vault_user_id = user_id or session_id
+    _, vault_db_path = resolve_active_vault(vault_user_id)
     history = payload.history or []
     is_system_prompt = bool(payload.is_system_prompt or False)
 
-    _gateway_log.info("in: %s", _truncate_log(message))
+    _gateway_log.info(f"in(chat_id={_c_chat_id(session_id)}): {_truncate_log(message)}")
 
     # Telegram Guard: autoriza antes de ejecutar comandos (/team, /sandbox, etc.)
     # y antes de invocar cualquier lógica LangGraph.
@@ -572,6 +641,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
                 message,
                 requester_id=user_id,
                 tenant_id=tenant_id,
+                vault_user_id=vault_user_id,
             )
             if cmd_reply is not None:
                 _gateway_log.info("fly: %s", _truncate_log(cmd_reply))
@@ -611,6 +681,8 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
                 history or [],
                 session_id,
                 tenant_id=tenant_id,
+                user_id=vault_user_id,
+                vault_db_path=vault_db_path,
                 is_system_prompt=is_system_prompt,
             )
         except Exception as exc:
@@ -652,7 +724,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         except Exception:
             pass
     reply_text = result.get("reply", "") if isinstance(result, dict) else (result or "")
-    _gateway_log.info("out: %s", _truncate_log(reply_text))
+    _gateway_log.info(f"out(chat_id={_c_chat_id(session_id)}): {_truncate_log(reply_text)}")
     reply_text = _strip_markdown_bold(reply_text or "")
     # Filtro UX: eliminar menús residuales del LLM antes de devolver al cliente
     reply_text = clean_agent_response(reply_text or "")
@@ -705,6 +777,8 @@ class WriteRequest(BaseModel):
     query: str = Field(..., description="Consulta SQL parametrizada")
     params: list = Field(default_factory=list, description="Parámetros para la consulta")
     tenant_id: str = Field(default="default", description="ID del tenant")
+    user_id: str | None = Field(default=None, description="ID del usuario dueño de la bóveda")
+    db_path: str | None = Field(default=None, description="Ruta DuckDB destino (bóveda activa)")
 
 
 class EnqueueResponse(BaseModel):
@@ -721,7 +795,23 @@ async def enqueue_write(req: WriteRequest):
             detail="Las consultas SELECT deben ejecutarse directamente, no encolarse.",
         )
     task_id = str(uuid.uuid4())
-    payload = {"task_id": task_id, "tenant_id": req.tenant_id, "query": req.query, "params": req.params}
+    user_id = (req.user_id or "").strip() or "default"
+    db_path = (req.db_path or "").strip()
+    if db_path and not validate_user_db_path(user_id, db_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="db_path inválido para el usuario.",
+        )
+    if not db_path:
+        _, db_path = resolve_active_vault(user_id)
+    payload = {
+        "task_id": task_id,
+        "tenant_id": req.tenant_id,
+        "user_id": user_id,
+        "db_path": db_path,
+        "query": req.query,
+        "params": req.params,
+    }
     try:
         await app.state.redis.lpush("duckdb_write_queue", json.dumps(payload))
         return EnqueueResponse(status="enqueued", task_id=task_id)

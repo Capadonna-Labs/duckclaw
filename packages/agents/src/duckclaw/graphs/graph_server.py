@@ -218,6 +218,7 @@ class InvokeRequest(BaseModel):
     stream: bool = Field(False, description="Si true, usar /stream en su lugar")
     username: str | None = Field(None, description="Nombre del usuario (para grupos)")
     chat_type: str | None = Field(None, description="Tipo de chat: private, group, supergroup, etc.")
+    user_id: str | None = Field(None, description="ID del usuario para resolver bóveda activa")
 
 
 class InvokeResponse(BaseModel):
@@ -270,7 +271,14 @@ async def invoke(req: InvokeRequest):
     t0 = time.monotonic()
     try:
         # El grafo manager se encarga de mapear state → subgrafos; general_graph usará username/chat_type.
-        result = await _ainvoke(graph, state["incoming"], history, req.chat_id, tenant_id=req.tenant_id)
+        result = await _ainvoke(
+            graph,
+            state["incoming"],
+            history,
+            req.chat_id,
+            tenant_id=req.tenant_id,
+            user_id=req.user_id,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error en el grafo: {exc}")
 
@@ -303,6 +311,7 @@ async def stream(req: InvokeRequest):
                 req.history,
                 req.chat_id,
                 tenant_id=req.tenant_id,
+                user_id=req.user_id,
             )
             reply = invoke_result.get("reply", "") or ""
             for word in reply.split(" "):
@@ -345,6 +354,8 @@ async def _ainvoke(
     chat_id: str,
     *,
     tenant_id: str = "default",
+    user_id: str | None = None,
+    vault_db_path: str | None = None,
     is_system_prompt: bool | None = False,
 ) -> dict:
     """
@@ -358,6 +369,8 @@ async def _ainvoke(
         "history": history or [],
         "chat_id": chat_id,
         "tenant_id": tenant_id,
+        "user_id": (user_id or "").strip() or str(chat_id),
+        "vault_db_path": (vault_db_path or "").strip() or "",
     }
     if is_system_prompt:
         state["is_system_prompt"] = True

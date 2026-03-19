@@ -1,5 +1,5 @@
 
-# Motor de Juego "The Mind" (Multi-Channel)
+# Motor de Juego The Mind (Multi-Channel)
 
 ## 1. Esquema de Base de Datos (DuckDB)
 Ejecutar este DDL en la base de datos del Gateway para mantener el estado de las partidas.

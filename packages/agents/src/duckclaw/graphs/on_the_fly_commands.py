@@ -11,6 +11,13 @@ import os
 import re
 import time
 from typing import Any, Optional, Tuple
+from duckclaw.vaults import (
+    create_vault as _vault_create,
+    list_vaults as _vault_list,
+    remove_vault as _vault_remove,
+    resolve_active_vault as _vault_resolve_active,
+    switch_vault as _vault_switch,
+)
 
 _PREFIX = "chat_"
 
@@ -274,6 +281,67 @@ def execute_team(db: Any, chat_id: Any, args: str) -> str:
         return _telegram_safe(f"Templates no encontrados: {', '.join(invalid)}. Disponibles: {', '.join(all_templates)}")
     set_team_templates(db, chat_id, valid)
     return _telegram_safe(f"✅ Equipo de este chat: {', '.join(valid)}. El manager delegará solo a estos.")
+
+
+def execute_vault(args: str, *, vault_user_id: Any) -> str:
+    user_id = (str(vault_user_id or "").strip() or "default")
+    raw = (args or "").strip()
+    if not raw:
+        active_id, active_path = _vault_resolve_active(user_id)
+        size = 0
+        try:
+            from pathlib import Path as _P
+            p = _P(active_path)
+            size = p.stat().st_size if p.exists() else 0
+        except Exception:
+            pass
+        return _telegram_safe(
+            f"🗄 Bóveda activa: {active_id}\nRuta: {active_path}\nTamaño: {size} bytes\n\n"
+            "Comandos: /vault list | /vault --list | /vault new <name> | /vault --new <name> | "
+            "/vault use <id> | /vault --use <id> | /vault rm <id> | /vault --rm <id>"
+        )
+    tokens = raw.split()
+    cmd = (tokens[0] or "").strip().lower()
+    # Compatibilidad: permitir flags estilo --list/--use/--new/--rm
+    if cmd.startswith("--"):
+        cmd = cmd[2:]
+    if cmd == "list":
+        rows = _vault_list(user_id)
+        if not rows:
+            return _telegram_safe("No hay bóvedas.")
+        lines = []
+        for r in rows:
+            mark = "✅" if r.get("is_active") else "•"
+            lines.append(f"{mark} {r.get('vault_id')} ({r.get('vault_name')}) - {r.get('size_bytes', 0)} bytes")
+        return _telegram_safe("🗄 Bóvedas:\n" + "\n".join(lines))
+    if cmd == "new":
+        name = " ".join(tokens[1:]).strip()
+        if not name:
+            return _telegram_safe("Uso: /vault new <name> | /vault --new <name>")
+        created = _vault_create(user_id, name)
+        return _telegram_safe(f"✅ Bóveda creada: {created.get('vault_id')} ({created.get('vault_name')})")
+    if cmd == "use":
+        vid = " ".join(tokens[1:]).strip()
+        if not vid:
+            return _telegram_safe("Uso: /vault use <vault_id> | /vault --use <vault_id>")
+        ok = _vault_switch(user_id, vid)
+        if not ok:
+            return _telegram_safe(f"No existe la bóveda '{vid}'. Usa /vault list.")
+        active_id, _ = _vault_resolve_active(user_id)
+        return _telegram_safe(f"✅ Bóveda activa actual: {active_id}")
+    if cmd == "rm":
+        vid = " ".join(tokens[1:]).strip()
+        if not vid:
+            return _telegram_safe("Uso: /vault rm <vault_id> | /vault --rm <vault_id>")
+        ok = _vault_remove(user_id, vid)
+        if not ok:
+            return _telegram_safe(f"No existe la bóveda '{vid}'.")
+        active_id, _ = _vault_resolve_active(user_id)
+        return _telegram_safe(f"🗑 Bóveda eliminada: {vid}. Activa actual: {active_id}")
+    return _telegram_safe(
+        "Uso: /vault | /vault list | /vault --list | /vault new <name> | /vault --new <name> | "
+        "/vault use <vault_id> | /vault --use <vault_id> | /vault rm <vault_id> | /vault --rm <vault_id>"
+    )
 
 
 def execute_team_whitelist(db: Any, tenant_id: Any, requester_id: Any, args: str) -> str:
@@ -1193,6 +1261,7 @@ def execute_help(db: Any, chat_id: Any) -> str:
     """/help: lista los fly commands disponibles."""
     lines = [
         (_telegram_safe("/team"), _telegram_safe("Whitelist: ver o agregar/quitar autorizados del tenant")),
+        (_telegram_safe("/vault"), _telegram_safe("Bóvedas privadas: ver/listar/crear/cambiar/eliminar")),
         (_telegram_safe("/workers"), _telegram_safe("Equipo (templates): ver o definir workers para este chat")),
         (_telegram_safe("/roles"), _telegram_safe("Ver todos los trabajadores virtuales (templates)")),
         (_telegram_safe("/tasks"), _telegram_safe("Estado actual: BUSY/IDLE, subagente, tarea")),
@@ -1222,6 +1291,7 @@ def handle_command(
     *,
     requester_id: Any = None,
     tenant_id: Any = None,
+    vault_user_id: Any = None,
 ) -> Optional[str]:
     """
     Middleware: si el mensaje es un comando on-the-fly, ejecuta y retorna la respuesta.
@@ -1240,6 +1310,8 @@ def handle_command(
         return execute_roles(db, chat_id)
     if name == "team":
         return execute_team_whitelist(db, tenant_id, requester_id, args)
+    if name == "vault":
+        return execute_vault(args, vault_user_id=vault_user_id or requester_id or chat_id)
     if name == "workers":
         return execute_team(db, chat_id, args)
     if name == "skills":

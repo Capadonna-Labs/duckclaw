@@ -79,6 +79,11 @@ def _get_db_path(worker_id: str, instance_name: Optional[str], base_path: Option
     if not base:
         base = str(Path.cwd() / "db" / "workers.duckdb")
     p = Path(base)
+    # Multi-vault: si ya recibimos una ruta explícita a un archivo .duckdb (p. ej. db/private/<user>/x.duckdb),
+    # respetarla tal cual y no reescribir a workers_<instance>.duckdb.
+    if base_path and p.suffix.lower() == ".duckdb":
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return str(p)
     if not p.suffix or p.suffix.lower() != ".duckdb":
         p = p / "workers.duckdb"
     # Optionally isolate per instance: db/workers_<instance>.duckdb
@@ -86,6 +91,15 @@ def _get_db_path(worker_id: str, instance_name: Optional[str], base_path: Option
         p = p.parent / f"workers_{instance_name}.duckdb"
     p.parent.mkdir(parents=True, exist_ok=True)
     return str(p)
+
+
+def _identity_fields(state: dict) -> dict:
+    return {
+        "chat_id": state.get("chat_id") or state.get("session_id"),
+        "tenant_id": state.get("tenant_id") or "default",
+        "user_id": state.get("user_id") or "",
+        "vault_db_path": state.get("vault_db_path") or "",
+    }
 
 
 def _build_worker_tools(db: Any, spec: WorkerSpec) -> list:
@@ -283,6 +297,17 @@ def build_worker_graph(
 
     from duckclaw import DuckClaw
     db = DuckClaw(path)
+    # Multi-vault: exponer siempre la bóveda activa bajo alias SQL `private`.
+    # Es best-effort para no romper workers existentes.
+    try:
+        escaped_path = str(path).replace("'", "''")
+        try:
+            db.execute("DETACH private")
+        except Exception:
+            pass
+        db.execute(f"ATTACH '{escaped_path}' AS private")
+    except Exception:
+        pass
     run_schema(db, spec)
 
     system_prompt = load_system_prompt(spec)
@@ -441,8 +466,9 @@ def build_worker_graph(
         messages.append(HumanMessage(content=user_content))
         # LangGraph puede reemplazar/limitar el state entre nodos; preservamos chat_id para
         # que _sandbox_enabled_for_state (y otros flags por sesión) lean el ID correcto.
-        preserved_chat_id = state.get("chat_id") or state.get("session_id")
-        return {"messages": messages, "incoming": incoming, "chat_id": preserved_chat_id}
+        out = {"messages": messages, "incoming": incoming}
+        out.update(_identity_fields(state))
+        return out
 
     def _sandbox_enabled_for_state(state: dict) -> bool:
         """Sandbox flag per chat/session (defaults to OFF)."""
@@ -462,7 +488,9 @@ def build_worker_graph(
 
     if llm is None:
         def agent_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
-            return {"messages": state["messages"] + [AIMessage(content="Sin LLM configurado. Configura DUCKCLAW_LLM_PROVIDER.")]}
+            out = {"messages": state["messages"] + [AIMessage(content="Sin LLM configurado. Configura DUCKCLAW_LLM_PROVIDER.")]}
+            out.update(_identity_fields(state))
+            return out
     else:
         # Cache de re-ligado por modo (evita re-bind costoso por chat/turno).
         llm_with_tools_on = llm.bind_tools(tools)
@@ -553,8 +581,9 @@ def build_worker_graph(
             tool_calls = getattr(resp, "tool_calls", None) or []
             if tool_calls:
                 _log.info("[finanz] LLM tool_calls=%s", [tc.get("name") for tc in tool_calls])
-            preserved_chat_id = state.get("chat_id") or state.get("session_id")
-            return {"messages": state["messages"] + [resp], "chat_id": preserved_chat_id}
+            out = {"messages": state["messages"] + [resp]}
+            out.update(_identity_fields(state))
+            return out
 
     def tools_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
         messages = state["messages"]
@@ -583,8 +612,9 @@ def build_worker_graph(
                     content = f"Herramienta desconocida: {name}"
                 _log.warning("[finanz] unknown/unavailable tool: %s (sandbox_enabled=%s)", name, sandbox_enabled)
             new_msgs.append(ToolMessage(content=content, tool_call_id=tid, name=name))
-        preserved_chat_id = state.get("chat_id") or state.get("session_id")
-        return {"messages": new_msgs, "chat_id": preserved_chat_id}
+        out = {"messages": new_msgs}
+        out.update(_identity_fields(state))
+        return out
 
     def set_reply(state: dict, config: Optional[RunnableConfig] = None) -> dict:
         from duckclaw.integrations.llm_providers import _strip_eot
@@ -608,8 +638,9 @@ def build_worker_graph(
                     return {"reply": format_tool_reply(text), "messages": msgs}
             except (json.JSONDecodeError, TypeError, KeyError, Exception):
                 pass
-        preserved_chat_id = state.get("chat_id") or state.get("session_id")
-        return {"reply": reply or "", "messages": msgs, "chat_id": preserved_chat_id}
+        out = {"reply": reply or "", "messages": msgs}
+        out.update(_identity_fields(state))
+        return out
 
     def should_continue(state: dict) -> str:
         last = state["messages"][-1]

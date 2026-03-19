@@ -29,6 +29,8 @@ class ManagerAgentState(TypedDict, total=False):
     messages: Annotated[List[BaseMessage], add_messages]
     chat_id: str
     tenant_id: str
+    user_id: str
+    vault_db_path: str
     assigned_worker_id: Optional[str]
 
     incoming: str

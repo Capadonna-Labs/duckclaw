@@ -5,6 +5,7 @@ import logging
 import duckdb
 import redis.asyncio as redis
 from core.config import settings
+from duckclaw.vaults import validate_user_db_path
 
 # Configuración de logging robusto
 logging.basicConfig(
@@ -53,15 +54,27 @@ async def execute_write(conn: duckdb.DuckDBPyConnection, message: str):
         task_id = payload.get("task_id", "unknown")
         query = payload.get("query")
         params = payload.get("params",[]) # <-- Línea completada
+        target_db_path = str(payload.get("db_path") or settings.DUCKDB_PATH)
+        user_id = str(payload.get("user_id") or "default")
 
         if not query:
             logger.warning(f"[{task_id}] Payload inválido: No hay query SQL.")
             return
+        if not validate_user_db_path(user_id, target_db_path):
+            logger.warning(f"[{task_id}] Rechazado: db_path fuera del directorio permitido del usuario.")
+            return
 
-        # Ejecutar la consulta en un hilo separado para no bloquear el Event Loop
-        await asyncio.to_thread(conn.execute, query, params)
+        # Ejecutar contra la ruta objetivo (path-aware por bóveda).
+        def _exec() -> None:
+            conn_local = duckdb.connect(target_db_path, read_only=False)
+            try:
+                conn_local.execute(query, params)
+            finally:
+                conn_local.close()
+
+        await asyncio.to_thread(_exec)
         
-        logger.info(f"[{task_id}] Escritura exitosa: {query[:60]}...")
+        logger.info(f"[{task_id}] Escritura exitosa en {target_db_path}: {query[:60]}...")
 
     except json.JSONDecodeError:
         logger.error("Error decodificando el mensaje de Redis. Formato JSON inválido.")
