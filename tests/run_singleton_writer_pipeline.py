@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from duckclaw.vaults import resolve_active_vault
+
 # Raíz del monorepo (tests/ está en la raíz)
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SERVICES = REPO_ROOT / "services"
@@ -322,7 +324,6 @@ def test_full_pipeline_e2e() -> None:
     assert db_writer_proc is not None
     gateway_proc = start_api_gateway()
     assert gateway_proc is not None
-    db_path = REPO_ROOT / "db" / "duckclaw.duckdb"
     try:
         assert wait_health(GATEWAY_URL, timeout=15.0), "Gateway /health did not respond"
         assert post_write(), "POST /api/v1/db/write failed"
@@ -334,12 +335,17 @@ def test_full_pipeline_e2e() -> None:
         gateway_proc.wait(timeout=5)
         db_writer_proc.wait(timeout=5)
 
-    # Verificación: que la escritura llegó a DuckDB (spec 04). Tras cerrar writer/gateway no hay lock.
-    if db_path.exists():
-        import duckdb
-        conn = duckdb.connect(str(db_path), read_only=True)
+    # Verificación: misma ruta que el Gateway para user_id default (Multi-Vault: bóveda activa, no duckclaw.duckdb legacy).
+    os.chdir(REPO_ROOT)
+    _, vault_db_path = resolve_active_vault("default")
+    db_path = Path(vault_db_path)
+    assert db_path.is_file(), f"No existe la DuckDB de la bóveda default: {db_path}"
+    import duckdb
+    conn = duckdb.connect(str(db_path), read_only=True)
+    try:
         rows = conn.execute("SELECT id, msg FROM _pipeline_test WHERE id = 1").fetchall()
+    finally:
         conn.close()
-        assert len(rows) == 1 and rows[0][1] == "Singleton Writer Bridge OK", (
-            f"Verificación DuckDB fallida: esperado (1, 'Singleton Writer Bridge OK'), obtuvo {rows}"
-        )
+    assert len(rows) == 1 and rows[0][1] == "Singleton Writer Bridge OK", (
+        f"Verificación DuckDB fallida en {db_path}: esperado (1, 'Singleton Writer Bridge OK'), obtuvo {rows}"
+    )
