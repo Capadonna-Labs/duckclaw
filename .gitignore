@@ -57,3 +57,5 @@ packages/agents/train/conversation_traces/
 /db/
 packages/agents/train/conversation_traces/
 dump.rdb
+# Local generated output
+output/
