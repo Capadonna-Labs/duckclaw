@@ -1,0 +1,26 @@
+# Plantilla de industria: Enterprise Core (Memoria Triple)
+# Spec: Arquitectura de Memoria Triple y Plantillas de Industria (v3.0)
+
+id: business_standard
+name: "Business Standard (Enterprise Core)"
+version: "1.0.0"
+description: >
+  DDL triple SQL + duckpgq (enterprise_kg) + VSS (768-dim embeddings).
+  Ruta física recomendada: db/private/{tenant_id}/default.duckdb (Multi-Vault).
+
+embedding_dimensions: 768
+
+extensions:
+  - name: duckpgq
+    install: "INSTALL duckpgq FROM community; LOAD duckpgq;"
+  - name: vss
+    install: "INSTALL vss; LOAD vss;"
+
+skills:
+  - unified_memory
+
+default_workers:
+  - finanz
+
+agent_config_defaults:
+  framework: langgraph

@@ -351,3 +351,33 @@ def validate_user_db_path(user_id: Any, db_path: str) -> bool:
         return path.suffix.lower() == ".duckdb"
     except Exception:
         return False
+
+
+def ensure_tenant_industry_db(tenant_id: Any, *, register_registry: bool = True) -> Path:
+    """
+    Aprovisiona `db/private/{tenant_id}/default.duckdb` (Multi-Vault / spec Memoria Triple v3.0).
+
+    Crea el archivo si no existe y, si register_registry, registra la bóveda `default` como activa
+    en `system.duckdb` (`user_vaults`).
+    """
+    uid = _safe_user_id(tenant_id)
+    path = vault_file_path(uid, "default")
+    _touch_duckdb_file(path)
+    if not register_registry:
+        return path.resolve()
+    ensure_registry()
+    sysdb = duckdb.connect(str(system_db_path()), read_only=False)
+    try:
+        _sync_registry_with_files(sysdb, uid)
+        sysdb.execute("UPDATE main.user_vaults SET is_active = FALSE WHERE user_id = ?", [uid])
+        sysdb.execute(
+            """
+            INSERT INTO main.user_vaults (user_id, vault_id, vault_name, is_active)
+            VALUES (?, 'default', 'default', TRUE)
+            ON CONFLICT (user_id, vault_id) DO UPDATE SET is_active = TRUE, vault_name = EXCLUDED.vault_name
+            """,
+            [uid],
+        )
+    finally:
+        sysdb.close()
+    return path.resolve()

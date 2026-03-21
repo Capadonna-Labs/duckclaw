@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 
@@ -131,6 +132,16 @@ def build_general_graph(
                 description="Preferencias del usuario: action=get|set|delete, key, value (solo para set).",
             )
         )
+
+    # Memoria triple (plantilla industry v3.0): tool explícita o si DUCKCLAW_INDUSTRY_TEMPLATE está definido
+    _industry_tpl = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
+    if "unified_memory" in tool_names_set or _industry_tpl:
+        try:
+            from duckclaw.forge.skills.unified_memory_orchestrator import make_unified_memory_tool
+
+            tools.append(make_unified_memory_tool(db))
+        except Exception:
+            pass
 
     # Sandbox (Strix) — solo si está en tools_spec y Docker está disponible
     if "run_sandbox" in tool_names_set:

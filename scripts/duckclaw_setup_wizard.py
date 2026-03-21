@@ -749,6 +749,41 @@ def _ensure_db_file_exists(repo_root: Path, db_path: str, console: Console | Non
         sys.path[:] = _orig_path
 
 
+def _maybe_apply_industry_template(repo_root: Path, console: Console) -> None:
+    """Spec Memoria Triple v3.0: aplica schema+seed en db/private/<tenant>/default.duckdb si hay plantilla."""
+    tpl = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
+    if not tpl:
+        return
+    os.environ.setdefault("DUCKCLAW_REPO_ROOT", str(repo_root.resolve()))
+    tenant = (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip()
+    _orig_path = sys.path.copy()
+    try:
+        sys.path.insert(0, str(repo_root))
+        from duckclaw.forge.industries.loader import apply_industry_to_db
+        from duckclaw.vaults import ensure_tenant_industry_db
+
+        import duckdb
+
+        path = ensure_tenant_industry_db(tenant)
+        conn = duckdb.connect(str(path), read_only=False)
+        try:
+            apply_industry_to_db(conn, tpl)
+        finally:
+            conn.close()
+        console.print(
+            Panel(
+                f"Plantilla industry [bold]{escape(tpl)}[/] aplicada en [dim]{path}[/] "
+                f"(tenant [bold]{escape(tenant)}[/]).",
+                title="Memoria triple",
+                border_style="green",
+            )
+        )
+    except Exception as e:
+        console.print(Panel(escape(str(e)), title="Industry template (advertencia)", border_style="yellow"))
+    finally:
+        sys.path[:] = _orig_path
+
+
 def _status_style(status: str) -> str:
     s = (status or "").strip().lower()
     if s == "online":
@@ -1326,6 +1361,14 @@ def _run_section(
                 _write_env_file(repo_root, "DUCKCLAW_DB_PATH", db_path_save)
                 _write_env_file(repo_root, "DUCKCLAW_SAVE_CONVERSATION_TRACES", "true" if save_conv else "false")
                 _write_env_file(repo_root, "DUCKCLAW_CONVERSATION_TRACES_FORMAT", fmt_traces)
+                _it = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
+                if _it:
+                    _write_env_file(repo_root, "DUCKCLAW_INDUSTRY_TEMPLATE", _it)
+                    _write_env_file(
+                        repo_root,
+                        "DUCKCLAW_TENANT_ID",
+                        (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip(),
+                    )
                 _ensure_db_file_exists(repo_root, db_path_save, console)
         state.pop("_used_preferences_skip", None)
         console.print()
@@ -1641,6 +1684,28 @@ def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
     state.setdefault("send_to_langsmith", True)
     idx = 0
 
+    _ind_tpl = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
+    if _ind_tpl:
+        os.environ.setdefault("DUCKCLAW_REPO_ROOT", str(repo_root.resolve()))
+        _orig_ir = sys.path.copy()
+        try:
+            sys.path.insert(0, str(repo_root))
+            from duckclaw.vaults import vault_file_path
+
+            _tid = (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip()
+            _vp = vault_file_path(_tid, "default")
+            try:
+                _sug = str(_vp.resolve().relative_to(repo_root.resolve())).replace("\\", "/")
+            except ValueError:
+                _sug = str(_vp.resolve())
+            _prev = (state.get("db_path") or "").strip()
+            if not saved or _prev in ("telegram.duckdb", "db/telegram.duckdb", ""):
+                state["db_path"] = _sug
+        except Exception:
+            pass
+        finally:
+            sys.path[:] = _orig_ir
+
     while True:
         section_id = SECTION_IDS[idx]
         if section_id == "provider" and state.get("bot_mode") != "langgraph":
@@ -1695,6 +1760,7 @@ def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
             break
         idx = next_i
 
+    _maybe_apply_industry_template(repo_root, console)
     return 0
 
 
