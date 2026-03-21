@@ -16,8 +16,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from duckclaw.forge.atoms.state import ManagerAgentState
+from duckclaw.utils.logger import get_obs_logger, log_plan, log_sys, set_log_context
 
 _log = logging.getLogger(__name__)
+_obs = get_obs_logger()
 _worker_graph_cache: dict[str, Any] = {}
 
 
@@ -239,7 +241,12 @@ def build_manager_graph(
             tasks_preview = ""
         if len(tasks_preview) > 160:
             tasks_preview = tasks_preview[:160] + "..."
-        _log.info("manager plan: [%s] | tasks: [%s]", safe_title or "(vacío)", tasks_preview or "(sin tareas)")
+        log_plan(
+            _obs,
+            "[%s] | tasks: [%s]",
+            safe_title or "(vacío)",
+            tasks_preview or "(sin tareas)",
+        )
         return out
 
     def invoke_worker_node(state: ManagerAgentState) -> ManagerAgentState:
@@ -285,6 +292,16 @@ def build_manager_graph(
                     instance_name=tenant_id,  # Aislar por tenant (Forge/WorkerFactory)
                 )
             worker_graph = _worker_graph_cache[worker_cache_key]
+            set_log_context(tenant_id=tenant_id, worker_id=assigned, chat_id=chat_id or "unknown")
+            raw_sb = get_chat_state(db, chat_id, "sandbox_enabled")
+            sb_on = (raw_sb or "").strip().lower() in ("true", "1", "on", "sí", "si")
+            db_display = vault_db_path or db_path or "(unknown)"
+            log_sys(
+                _obs,
+                "Sandbox: %s | DB: %s",
+                "ON" if sb_on else "OFF",
+                db_display,
+            )
             # Pasar la tarea planificada al worker para que use herramientas y no responda genérico
             # Incluimos chat_id para que el worker pueda leer sandbox_enabled por sesión.
             worker_state = {

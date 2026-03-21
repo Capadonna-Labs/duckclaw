@@ -12,6 +12,8 @@ import logging
 import os
 from typing import Any, Optional
 
+from duckclaw.utils.logger import log_tool_execution_sync
+
 _log = logging.getLogger(__name__)
 
 
@@ -101,6 +103,7 @@ def _extract_portfolio_context(data: Any) -> str:
     return "\n".join(lines)
 
 
+@log_tool_execution_sync(name="get_ibkr_portfolio")
 def _get_ibkr_portfolio_impl() -> str:
     """
     Consulta el endpoint de IBKR y retorna el estado del portafolio.

@@ -62,18 +62,22 @@ except ImportError:
         REDIS_URL = "redis://localhost:6379/0"
     settings = _Settings()
 
-# Logs para PM2
-def _ensure_log_handler():
-    for name in ("duckclaw.gateway", "duckclaw.graphs.general_graph", "duckclaw.graphs.retail_graph", "duckclaw.graphs.manager_graph", "duckclaw.bi.agent"):
-        log = logging.getLogger(name)
-        if not log.handlers:
-            h = logging.StreamHandler(sys.stdout)
-            h.setLevel(logging.INFO)
-            h.setFormatter(logging.Formatter("%(message)s"))
-            log.addHandler(h)
-            log.setLevel(logging.INFO)
-_ensure_log_handler()
+# Logs estructurados (Observabilidad 2.0)
+from duckclaw.utils.logger import (
+    configure_structured_logging,
+    get_obs_logger,
+    log_err,
+    log_req,
+    log_res,
+    reset_log_context,
+    set_log_context,
+)
+
+_log_level_name = (os.environ.get("DUCKCLAW_LOG_LEVEL") or "INFO").strip().upper()
+_log_level = getattr(logging, _log_level_name, logging.INFO)
+configure_structured_logging(level=_log_level)
 _gateway_log = logging.getLogger("duckclaw.gateway")
+_obs_log = get_obs_logger()
 
 _AUTHORIZED_USERS_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS main.authorized_users (
@@ -226,6 +230,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+async def _observability_context_middleware(request: Request, call_next):
+    """Inyecta tenant/worker/chat en contextvars para líneas de log (refinado en _invoke_chat)."""
+    path = request.url.path or ""
+    tenant = (request.headers.get("X-Tenant-Id") or "").strip() or "default"
+    chat = (request.headers.get("X-Chat-Id") or "").strip() or "unknown"
+    worker = "manager"
+    m = re.search(r"/api/v1/agent/([^/]+)/chat", path)
+    if m:
+        worker = (m.group(1) or "manager").strip() or "manager"
+    set_log_context(tenant_id=tenant, worker_id=worker, chat_id=chat)
+    try:
+        return await call_next(request)
+    finally:
+        reset_log_context()
+
+
+app.middleware("http")(_observability_context_middleware)
 
 
 async def _tailscale_auth_middleware(request: Request, call_next):
@@ -612,7 +635,8 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     history = payload.history or []
     is_system_prompt = bool(payload.is_system_prompt or False)
 
-    _gateway_log.info(f"in(chat_id={_c_chat_id(session_id)}): {_truncate_log(message)}")
+    set_log_context(tenant_id=tenant_id, worker_id=worker_id, chat_id=session_id)
+    log_req(_obs_log, _truncate_log(message))
 
     # Telegram Guard: autoriza antes de ejecutar comandos (/team, /sandbox, etc.)
     # y antes de invocar cualquier lógica LangGraph.
@@ -719,6 +743,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
                     )
             except Exception:
                 pass
+            log_err(_obs_log, "agent_chat failed: %s", exc)
             _gateway_log.error("agent_chat failed: %s\n%s", exc, traceback.format_exc())
             raise HTTPException(status_code=500, detail=str(exc))
 
@@ -728,13 +753,28 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         except Exception:
             pass
     reply_text = result.get("reply", "") if isinstance(result, dict) else (result or "")
+    # Grafo manager devuelve assigned_worker_id; refinar contexto de log para [RES]
+    effective_worker_id = result.get("assigned_worker_id", worker_id) if isinstance(result, dict) else worker_id
+    set_log_context(tenant_id=tenant_id, worker_id=effective_worker_id or worker_id, chat_id=session_id)
+    usage = result.get("usage_tokens") if isinstance(result, dict) else None
+    tok_extra = ""
+    if isinstance(usage, dict) and usage:
+        tok_extra = (
+            f" | 🪙 Tokens: {usage.get('total_tokens', 0)} "
+            f"[P:{usage.get('input_tokens', 0)}, C:{usage.get('output_tokens', 0)}]"
+        )
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    log_res(
+        _obs_log,
+        "%s (⏱️ Total: %.1fs%s)",
+        _truncate_log(reply_text),
+        elapsed_ms / 1000.0,
+        tok_extra,
+    )
     _gateway_log.info(f"out(chat_id={_c_chat_id(session_id)}): {_truncate_log(reply_text)}")
     reply_text = _strip_markdown_bold(reply_text or "")
     # Filtro UX: eliminar menús residuales del LLM antes de devolver al cliente
     reply_text = clean_agent_response(reply_text or "")
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    # Grafo manager devuelve assigned_worker_id; usarlo para respuesta y trazas
-    effective_worker_id = result.get("assigned_worker_id", worker_id) if isinstance(result, dict) else worker_id
     try:
         if not result.get("_audit_done"):
             from duckclaw.graphs.on_the_fly_commands import append_task_audit, get_worker_id_for_chat

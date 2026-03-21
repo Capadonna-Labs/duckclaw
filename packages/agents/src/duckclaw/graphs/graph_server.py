@@ -54,6 +54,17 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
+import logging as _logging
+
+from duckclaw.utils.logger import (
+    configure_structured_logging,
+    extract_usage_from_messages,
+    structured_log_context,
+)
+
+_lvl_name = (os.environ.get("DUCKCLAW_LOG_LEVEL") or "INFO").strip().upper()
+configure_structured_logging(level=getattr(_logging, _lvl_name, _logging.INFO))
+
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 
 try:
@@ -226,6 +237,7 @@ class InvokeResponse(BaseModel):
     model: str
     elapsed_ms: int
     chat_id: str
+    usage_tokens: dict[str, int] | None = None
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -269,16 +281,18 @@ async def invoke(req: InvokeRequest):
     }
 
     t0 = time.monotonic()
+    uid = (req.user_id or "").strip() or req.chat_id
     try:
-        # El grafo manager se encarga de mapear state → subgrafos; general_graph usará username/chat_type.
-        result = await _ainvoke(
-            graph,
-            state["incoming"],
-            history,
-            req.chat_id,
-            tenant_id=req.tenant_id,
-            user_id=req.user_id,
-        )
+        with structured_log_context(tenant_id=req.tenant_id, chat_id=req.chat_id, worker_id="manager"):
+            # El grafo manager se encarga de mapear state → subgrafos; general_graph usará username/chat_type.
+            result = await _ainvoke(
+                graph,
+                state["incoming"],
+                history,
+                req.chat_id,
+                tenant_id=req.tenant_id,
+                user_id=uid,
+            )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error en el grafo: {exc}")
 
@@ -288,6 +302,7 @@ async def invoke(req: InvokeRequest):
         model=_resolve_display_model(),
         elapsed_ms=elapsed_ms,
         chat_id=req.chat_id,
+        usage_tokens=result.get("usage_tokens"),
     )
 
 
@@ -305,14 +320,16 @@ async def stream(req: InvokeRequest):
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            invoke_result = await _ainvoke(
-                graph,
-                req.message,
-                req.history,
-                req.chat_id,
-                tenant_id=req.tenant_id,
-                user_id=req.user_id,
-            )
+            uid = (req.user_id or "").strip() or req.chat_id
+            with structured_log_context(tenant_id=req.tenant_id, chat_id=req.chat_id, worker_id="manager"):
+                invoke_result = await _ainvoke(
+                    graph,
+                    req.message,
+                    req.history,
+                    req.chat_id,
+                    tenant_id=req.tenant_id,
+                    user_id=uid,
+                )
             reply = invoke_result.get("reply", "") or ""
             for word in reply.split(" "):
                 yield f"data: {word} \n\n"
@@ -382,7 +399,12 @@ async def _ainvoke(
         result = await loop.run_in_executor(None, graph.invoke, state)
 
     reply = str(result.get("reply") or result.get("output") or "Sin respuesta.")
-    return {"reply": reply, "messages": result.get("messages")}
+    messages = result.get("messages")
+    usage = extract_usage_from_messages(messages)
+    out: dict[str, Any] = {"reply": reply, "messages": messages}
+    if usage:
+        out["usage_tokens"] = usage
+    return out
 
 
 async def _async_sleep(seconds: float) -> None:

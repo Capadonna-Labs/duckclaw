@@ -21,6 +21,7 @@ try:
 except ImportError:
     RunnableConfig = Any  # type: ignore[misc, assignment]
 
+from duckclaw.utils.logger import log_tool_execution_sync
 from duckclaw.workers.manifest import WorkerSpec, load_manifest, get_worker_dir
 from duckclaw.workers.loader import load_system_prompt, load_skills, run_schema
 
@@ -149,6 +150,8 @@ def _build_worker_tools(db: Any, spec: WorkerSpec) -> list:
             return db.query(q)
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    _read_sql_worker = log_tool_execution_sync(name="read_sql")(_read_sql_worker)
 
     tools.append(
         StructuredTool.from_function(
@@ -478,9 +481,6 @@ def build_worker_graph(
         raw = get_chat_state(db, chat_id, "sandbox_enabled")
         v = (raw or "").strip().lower()
         enabled = v in ("true", "1", "on", "sí", "si")
-        # Use warning so it always shows up in pm2 logs even if INFO is filtered.
-        db_path = getattr(db, "_path", None) or getattr(db, "path", None) or "(unknown_db_path)"
-        _log.warning("[sandbox] db_path=%r chat_id=%r sandbox_enabled_raw=%r enabled=%s", db_path, chat_id, raw, enabled)
         return enabled
 
     tools_sandbox_off = filter_tools_for_sandbox(tools, enabled=False)

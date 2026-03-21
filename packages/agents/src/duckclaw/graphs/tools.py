@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from duckclaw.utils.logger import log_tool_execution_sync
+
 # Solo lectura: consultas que no modifican datos/estructura.
 _READ_ONLY = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE|EXPLAIN|PRAGMA)\s", re.IGNORECASE)
 
@@ -32,6 +34,7 @@ def _ensure_memory_table(db: Any) -> None:
     )
 
 
+@log_tool_execution_sync(name="read_sql")
 def read_sql(db: Any, query: str) -> str:
     """Solo lectura SQL: SELECT/WITH/SHOW/DESCRIBE/EXPLAIN/PRAGMA. Retorna filas como JSON/string."""
     if not query or not query.strip():
@@ -99,6 +102,7 @@ def get_db_path(db: Any) -> str:
         return "(ruta no disponible)"
 
 
+@log_tool_execution_sync(name="inspect_schema")
 def inspect_schema(db: Any) -> str:
     """Retorna la estructura de la DB: lista de tablas con sus columnas en formato legible."""
     try:
