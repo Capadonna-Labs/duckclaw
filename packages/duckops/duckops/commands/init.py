@@ -22,17 +22,12 @@ def cmd_init(
     ctx: typer.Context,
     tenant_id: str = typer.Argument(
         default="default",
-        help="ID del tenant (Multi-Vault / memoria industry); se expone al wizard como DUCKCLAW_TENANT_ID.",
+        help="ID del tenant (para futura multi-tenancy).",
     ),
     use_wizard: bool = typer.Option(
         True,
         "--wizard/--no-wizard",
         help="Ejecutar wizard interactivo (Rich).",
-    ),
-    industry: str | None = typer.Option(
-        None,
-        "--industry",
-        help="Plantilla Forge (p. ej. business_standard). Valida contra plantillas instaladas si duckclaw-agents está disponible.",
     ),
 ) -> None:
     """Inicializa un nuevo tenant con su base de datos y configuración."""
@@ -47,33 +42,9 @@ def cmd_init(
 
     typer.secho(f"Forjando agente para {tenant_id}...", fg=typer.colors.CYAN)
 
-    if industry and industry.strip():
-        tid = industry.strip()
-        _old_path = list(sys.path)
-        try:
-            sys.path.insert(0, str(repo))
-            try:
-                from duckclaw.forge.industries.loader import list_industry_templates
-            except ImportError:
-                list_industry_templates = None  # type: ignore[misc, assignment]
-            if list_industry_templates is not None:
-                known = list_industry_templates()
-                if known and tid not in known:
-                    typer.secho(
-                        f"Plantilla industry desconocida: {tid}. Disponibles: {', '.join(known)}",
-                        fg=typer.colors.RED,
-                        err=True,
-                    )
-                    raise typer.Exit(1)
-        finally:
-            sys.path[:] = _old_path
-
     if use_wizard:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(repo) + (os.pathsep + env.get("PYTHONPATH", "") if env.get("PYTHONPATH") else "")
-        env["DUCKCLAW_TENANT_ID"] = tenant_id.strip() or "default"
-        if industry and industry.strip():
-            env["DUCKCLAW_INDUSTRY_TEMPLATE"] = industry.strip()
         try:
             result = subprocess.run(
                 [sys.executable, str(wizard_script)],

@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from typing import Any, List
 
-from duckclaw.sql_split import split_sql_statements
 from duckclaw.workers.manifest import WorkerSpec
 
 
@@ -84,7 +83,7 @@ def run_schema(db: Any, spec: WorkerSpec, seed_beliefs: bool = True) -> None:
     if not sql:
         return
     # Run each statement (split by ;)
-    for stmt in split_sql_statements(sql):
+    for stmt in _split_sql(sql):
         if stmt.strip():
             db.execute(stmt)
 
@@ -94,8 +93,39 @@ def _safe_ident(name: str) -> str:
     return "".join(c if c.isalnum() or c == "_" else "_" for c in name.strip())
 
 
-# Compat: código legacy que importaba desde workers.loader
-_split_sql = split_sql_statements
+def _split_sql(sql: str) -> List[str]:
+    """Split SQL by semicolon, respecting strings."""
+    out = []
+    buf = []
+    in_str = None
+    i = 0
+    while i < len(sql):
+        c = sql[i]
+        if in_str:
+            if c == "\\" and i + 1 < len(sql):
+                buf.append(sql[i : i + 2])
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            buf.append(c)
+            i += 1
+            continue
+        if c in ("'", '"'):
+            in_str = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == ";":
+            out.append("".join(buf).strip())
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    if buf:
+        out.append("".join(buf).strip())
+    return out
 
 
 def load_skills(spec: WorkerSpec, db: Any) -> List[Any]:

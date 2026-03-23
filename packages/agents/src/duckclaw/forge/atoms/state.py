@@ -16,6 +16,7 @@ class ManagerAgentState(TypedDict, total=False):
     - tenant_id: identificador lógico del tenant (para whitelist y aislamiento de workers).
     - assigned_worker_id: worker al que se delegó la tarea (finanz, support, etc.).
     - incoming: mensaje original del usuario.
+    - input: mismo texto que incoming cuando aplica (LangSmith / vista previa columna Input).
     - history: historial condensado de conversación (lista de mensajes o turnos).
     - planned_task: instrucción detallada que se envía al worker.
     - plan_title: título semántico del plan (máx. ~5 palabras).
@@ -34,6 +35,7 @@ class ManagerAgentState(TypedDict, total=False):
     assigned_worker_id: Optional[str]
 
     incoming: str
+    input: Optional[str]
     history: list
 
     planned_task: str

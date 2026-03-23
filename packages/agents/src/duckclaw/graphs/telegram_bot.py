@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from duckclaw.utils.langsmith_trace import get_tracing_config
+
 _AGENT_CONFIG_TABLE = "agent_config"
 
 
@@ -427,14 +429,16 @@ def _run_bot() -> None:
                 )
                 history = self._get_history(chat_id, limit=history_limit)
                 _persist_conversation(self.db, chat_id, "user", text)
-                state = {"incoming": text, "history": history}
+                state = {"input": text, "incoming": text, "history": history}
                 if use_rag:
                     try:
                         from duckclaw.graphs.graph_rag import graph_context_retriever
                         state["graph_context"] = graph_context_retriever(self.db, text) or ""
                     except Exception:
                         state["graph_context"] = ""
-                result = graph.invoke(state)
+                wk = (worker_id or "forge").strip() or "forge"
+                trace_cfg = get_tracing_config("default", wk, str(chat_id))
+                result = graph.invoke(state, trace_cfg)
                 reply = result.get("reply") or ""
             except RuntimeError as e:
                 reply = str(e)

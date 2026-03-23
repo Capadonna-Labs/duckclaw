@@ -1,0 +1,85 @@
+{
+  "name": "DuckClaw The Mind → Gateway (8080)",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "description": "Telegram (mind_crupier_bot o el bot que uses) → POST al TheMind-Gateway. Tras importar: credenciales Telegram + URL base en variable DUCKCLAW_THEMIND_URL o edita el nodo HTTP (puerto 8080)."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"]
+      },
+      "id": "tg-trigger-mind",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "webhookId": "duckclaw-themind-telegram"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8080/api/v1/agent/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.message?.text || '', chat_id: String($json.message?.chat?.id ?? ''), user_id: String($json.message?.from?.id ?? $json.message?.chat?.id ?? ''), username: ($json.message?.from?.username || $json.message?.from?.first_name || 'Usuario'), chat_type: ($json.message?.chat?.type || 'private'), tenant_id: 'default' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-themind-gateway",
+      "name": "DuckClaw API Gateway (TheMind)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 0]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.response }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "telegram-reply-mind",
+      "name": "Responder Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [560, 0]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "DuckClaw API Gateway (TheMind)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DuckClaw API Gateway (TheMind)": {
+      "main": [
+        [
+          {
+            "node": "Responder Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "versionId": "duckclaw-themind-v1"
+}

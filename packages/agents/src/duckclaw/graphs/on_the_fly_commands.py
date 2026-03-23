@@ -19,6 +19,12 @@ from duckclaw.vaults import (
     switch_vault as _vault_switch,
 )
 
+from duckclaw.forge.skills.the_mind_outbound import (
+    broadcast_message_to_players,
+    deal_cards_for_level,
+)
+from duckclaw.utils.logger import get_obs_logger, log_fly, structured_log_context
+
 _PREFIX = "chat_"
 
 # Caracteres que Telegram Markdown/MarkdownV2 interpretan; escapar para evitar "Can't find end of entity"
@@ -306,9 +312,51 @@ def execute_team(db: Any, chat_id: Any, args: str) -> str:
     return _telegram_safe(f"✅ Equipo de este chat: {', '.join(valid)}. El manager delegará solo a estos.")
 
 
+def _the_mind_gateway_fixed_db_path() -> str | None:
+    """
+    TheMind-Gateway usa una sola DuckDB (the_mind.duckdb), no el registry multi-bóveda
+    de system.duckdb (que sigue apuntando a finanzdb1 para el mismo user_id).
+    """
+    if (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() != "TheMind-Gateway":
+        return None
+    p = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
+    return p or None
+
+
 def execute_vault(args: str, *, vault_user_id: Any) -> str:
     user_id = (str(vault_user_id or "").strip() or "default")
     raw = (args or "").strip()
+    fixed_db = _the_mind_gateway_fixed_db_path()
+    if fixed_db:
+        from pathlib import Path as _P
+
+        fp = _P(fixed_db).expanduser().resolve()
+        if not raw:
+            size = 0
+            try:
+                size = fp.stat().st_size if fp.exists() else 0
+            except Exception:
+                pass
+            return _telegram_safe(
+                f"🗄 BD de este gateway (The Mind): {fp.name}\n"
+                f"Ruta: {fp}\nTamaño: {size} bytes\n\n"
+                "Aquí no se usa el registry de bóvedas de Finanz (list/use/new/rm). "
+                "Finanz corre en otro proceso PM2 con su propia BD."
+            )
+        tokens = raw.split()
+        cmd = (tokens[0] or "").strip().lower()
+        if cmd.startswith("--"):
+            cmd = cmd[2:]
+        if cmd in ("list", "new", "use", "rm"):
+            return _telegram_safe(
+                "En TheMind-Gateway solo existe la BD del juego (the_mind). "
+                "Los comandos /vault list|new|use|rm son del registry multi-bóveda en Finanz; "
+                "aquí no aplican. Usa /vault sin argumentos para ver la ruta."
+            )
+        return _telegram_safe(
+            "Usa /vault sin argumentos para ver la BD de The Mind. "
+            "Comandos adicionales del registry no aplican en este gateway."
+        )
     if not raw:
         active_id, active_path = _vault_resolve_active(user_id)
         size = 0
@@ -527,52 +575,181 @@ def execute_forget(db: Any, chat_id: Any) -> str:
     return _telegram_safe("✅ Historial borrado.")
 
 
-def execute_start_mind(db: Any, chat_id: Any) -> str:
-    """/start_mind: inicializa el esquema del juego The Mind (modo legado por chat)."""
+def _ensure_the_mind_schema(db: Any) -> None:
+    """DDL único para The Mind + migraciones ligeras."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS the_mind_games ("
+        "game_id VARCHAR PRIMARY KEY, "
+        "status VARCHAR, "
+        "current_level INTEGER, "
+        "lives INTEGER, "
+        "shurikens INTEGER, "
+        "cards_played INTEGER[])"
+    )
     try:
-        # Mantener compatibilidad con versiones anteriores que usaban chat_id/level como columnas.
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS the_mind_games ("
-            "game_id VARCHAR PRIMARY KEY, "
-            "status VARCHAR, "
-            "current_level INTEGER, "
-            "lives INTEGER, "
-            "shurikens INTEGER, "
-            "cards_played INTEGER[])"
-        )
-        # Migración ligera: si existe una tabla antigua con columnas chat_id/level, renombrarlas.
-        try:
-            import json as _json
+        import json as _json
 
-            info = db.query("PRAGMA table_info('the_mind_games')")
-            rows = _json.loads(info) if isinstance(info, str) else (info or [])
-            col_names = {str(r.get("name")) for r in rows if isinstance(r, dict)}
-            if "chat_id" in col_names and "game_id" not in col_names:
-                db.execute("ALTER TABLE the_mind_games RENAME COLUMN chat_id TO game_id")
-            if "level" in col_names and "current_level" not in col_names:
-                db.execute("ALTER TABLE the_mind_games RENAME COLUMN level TO current_level")
-            # Asegurar columna status con default
-            if "status" not in col_names:
-                db.execute(
-                    "ALTER TABLE the_mind_games ADD COLUMN status VARCHAR DEFAULT 'waiting'"
-                )
-        except Exception:
-            # Si la migración falla no debe romper el comando; el INSERT detectará el problema.
-            pass
+        info = db.query("PRAGMA table_info('the_mind_games')")
+        rows = _json.loads(info) if isinstance(info, str) else (info or [])
+        col_names = {str(r.get("name")) for r in rows if isinstance(r, dict)}
+        if "chat_id" in col_names and "game_id" not in col_names:
+            db.execute("ALTER TABLE the_mind_games RENAME COLUMN chat_id TO game_id")
+        if "level" in col_names and "current_level" not in col_names:
+            db.execute("ALTER TABLE the_mind_games RENAME COLUMN level TO current_level")
+        if "status" not in col_names:
+            db.execute("ALTER TABLE the_mind_games ADD COLUMN status VARCHAR DEFAULT 'waiting'")
+    except Exception:
+        pass
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS the_mind_players ("
+        "game_id VARCHAR, "
+        "chat_id VARCHAR, "
+        "username VARCHAR, "
+        "cards INTEGER[], "
+        "is_ready BOOLEAN, "
+        "PRIMARY KEY (game_id, chat_id))"
+    )
+    try:
+        db.execute("ALTER TABLE the_mind_players ADD COLUMN user_id VARCHAR")
+    except Exception:
+        pass
+
+
+def _merge_the_mind_player(
+    db: Any,
+    game_id: str,
+    chat_id: str,
+    username: str,
+    *,
+    user_id: str | None = None,
+) -> None:
+    """Inserta o actualiza jugador en partida (preserva mano si ya existía)."""
+    uid = (user_id or "").strip() or None
+    ex = list(
         db.execute(
-            "CREATE TABLE IF NOT EXISTS the_mind_players ("
-            "game_id VARCHAR, "
-            "chat_id VARCHAR, "
-            "username VARCHAR, "
-            "cards INTEGER[], "
-            "is_ready BOOLEAN, "
-            "PRIMARY KEY (game_id, chat_id))"
+            "SELECT 1 FROM the_mind_players WHERE game_id = ? AND chat_id = ?",
+            (game_id, chat_id),
         )
-        return _telegram_safe(
-            "🧠 The Mind: esquema inicializado. Usa /new_game the_mind para crear una partida."
+    )
+    if ex:
+        if uid:
+            db.execute(
+                "UPDATE the_mind_players SET username = ?, user_id = COALESCE(?, user_id) "
+                "WHERE game_id = ? AND chat_id = ?",
+                (username or "", uid, game_id, chat_id),
+            )
+        else:
+            db.execute(
+                "UPDATE the_mind_players SET username = ? WHERE game_id = ? AND chat_id = ?",
+                (username or "", game_id, chat_id),
+            )
+    else:
+        db.execute(
+            "INSERT INTO the_mind_players (game_id, chat_id, username, cards, is_ready, user_id) "
+            "VALUES (?, ?, ?, ARRAY[]::INTEGER[], FALSE, ?)",
+            (game_id, chat_id, username or "", uid),
         )
-    except Exception as e:
-        return _telegram_safe(f"No se pudo inicializar el esquema de The Mind: {e}")
+
+
+def _mind_tx_begin(db: Any) -> None:
+    try:
+        db.execute("BEGIN TRANSACTION")
+    except Exception:
+        try:
+            db.execute("BEGIN")
+        except Exception:
+            pass
+
+
+def _mind_tx_commit(db: Any) -> None:
+    try:
+        db.execute("COMMIT")
+    except Exception:
+        pass
+
+
+def _mind_tx_rollback(db: Any) -> None:
+    try:
+        db.execute("ROLLBACK")
+    except Exception:
+        pass
+
+
+_THE_MIND_MAX_LEVEL = 12
+
+
+def _team_allows_user(db: Any, tenant_id: str | None, user_id: Any) -> tuple[bool, str]:
+    """
+    Si hay al menos un usuario en authorized_users del tenant, solo esos user_id
+    pueden crear/unirse a partidas The Mind. Si la lista está vacía, no se restringe
+    (compatibilidad con despliegues sin whitelist).
+    """
+    tid = str(tenant_id or "default").strip() or "default"
+    users = _list_authorized_users(db, tenant_id=tid)
+    if not users:
+        return True, ""
+    uid = str(user_id or "").strip()
+    if not uid:
+        return False, "Falta identidad de usuario (user_id). El Gateway debe enviar user_id para The Mind."
+    allowed = {str(u.get("user_id") or "").strip() for u in users if u.get("user_id")}
+    if uid in allowed:
+        return True, ""
+    return (
+        False,
+        "Solo pueden jugar usuarios listados en /team para este tenant. Pide a un admin que ejecute `/team --add <tu_user_id>`.",
+    )
+
+
+def _all_mind_players_in_team(db: Any, game_id: str, tenant_id: str | None) -> tuple[bool, str]:
+    """
+    Si /team no está vacío, todos los jugadores deben tener user_id y estar en la whitelist.
+    Si /team está vacío, no se exige user_id (compatibilidad con clientes sin identidad).
+    """
+    tid = str(tenant_id or "default").strip() or "default"
+    roster = _list_authorized_users(db, tenant_id=tid)
+    if not roster:
+        return True, ""
+    allowed = {str(u.get("user_id") or "").strip() for u in roster if u.get("user_id")}
+    rows = list(db.execute("SELECT user_id FROM the_mind_players WHERE game_id = ?", (game_id,)))
+    for (uid_raw,) in rows:
+        uid = str(uid_raw or "").strip()
+        if not uid:
+            return (
+                False,
+                "No se puede iniciar: falta user_id en algún jugador. Con /team configurado, cada uno debe usar `/join` desde un cliente que envíe user_id al Gateway.",
+            )
+        if uid not in allowed:
+            return (
+                False,
+                f"No se puede iniciar: el jugador user_id={uid} no está en /team para este tenant.",
+            )
+    return True, ""
+
+
+def _the_mind_invite_hint(db: Any, tenant_id: str | None, game_id: str) -> str:
+    """Texto corto: equipo /team, DMs vs avisos, pasos para invitar e iniciar."""
+    tid = str(tenant_id or "default").strip() or "default"
+    users = _list_authorized_users(db, tenant_id=tid)
+    if users:
+        team_lines = []
+        for u in users:
+            uid = str(u.get("user_id") or "").strip()
+            uname = str(u.get("username") or "").strip()
+            team_lines.append(f"- {uid}" + (f" (@{uname})" if uname else ""))
+        team_block = "\n".join(team_lines)
+    else:
+        team_block = "(Nadie en /team: un admin debe usar /team --add <user_id> [nombre].)"
+
+    return _telegram_safe(
+        "\n\n---\n"
+        "Cómo invitar e iniciar:\n"
+        "• Solo pueden unirse quienes estén en /team (tenant actual).\n"
+        "• Cartas: cada jugador recibe un mensaje distinto por DM.\n"
+        "• Avisos del juego (nivel, errores, victoria): el mismo texto a todos los DM de la partida.\n"
+        f"• Equipo autorizado ahora:\n{team_block}\n"
+        f"• Pasos: cada jugador abre DM con el bot y envía /join {game_id}.\n"
+        f"• Luego el anfitrión: /start_mind {game_id}\n"
+    )
 
 
 def _new_game_id() -> str:
@@ -587,58 +764,60 @@ def _new_game_id() -> str:
     return f"game_{ts}_{suffix}"
 
 
-def execute_new_game(db: Any, chat_id: Any, args: str) -> str:
+def execute_new_game(
+    db: Any,
+    chat_id: Any,
+    args: str,
+    *,
+    requester_id: Any = None,
+    tenant_id: Any = None,
+) -> str:
     """/new_game the_mind: crea una nueva partida de The Mind y devuelve el game_id."""
     game_type = (args or "").strip().lower()
     if game_type not in ("the_mind", "themind", "themindcrupier"):
         return _telegram_safe("Uso: /new_game the_mind")
     try:
-        # Asegurar esquema y migración por si existen tablas antiguas.
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS the_mind_games ("
-            "game_id VARCHAR PRIMARY KEY, "
-            "status VARCHAR, "
-            "current_level INTEGER, "
-            "lives INTEGER, "
-            "shurikens INTEGER, "
-            "cards_played INTEGER[])"
-        )
-        try:
-            import json as _json
-
-            info = db.query("PRAGMA table_info('the_mind_games')")
-            rows = _json.loads(info) if isinstance(info, str) else (info or [])
-            col_names = {str(r.get("name")) for r in rows if isinstance(r, dict)}
-            if "chat_id" in col_names and "game_id" not in col_names:
-                db.execute("ALTER TABLE the_mind_games RENAME COLUMN chat_id TO game_id")
-            if "level" in col_names and "current_level" not in col_names:
-                db.execute("ALTER TABLE the_mind_games RENAME COLUMN level TO current_level")
-            if "status" not in col_names:
-                db.execute(
-                    "ALTER TABLE the_mind_games ADD COLUMN status VARCHAR DEFAULT 'waiting'"
-                )
-        except Exception:
-            pass
+        _ensure_the_mind_schema(db)
+        tid = str(tenant_id or "default").strip() or "default"
+        ok, err = _team_allows_user(db, tid, requester_id)
+        if not ok:
+            return _telegram_safe(err)
         game_id = _new_game_id()
         db.execute(
             "INSERT INTO the_mind_games (game_id, status, current_level, lives, shurikens, cards_played) "
             "VALUES (?, 'waiting', 1, 3, 1, ARRAY[]::INTEGER[])",
             (game_id,),
         )
-        return _telegram_safe(
+        cid = str(chat_id).replace("'", "''")[:256]
+        uname = get_chat_state(db, chat_id, "username") or ""
+        rid = str(requester_id or "").strip() or None
+        _merge_the_mind_player(db, game_id, cid, uname, user_id=rid)
+        base = _telegram_safe(
             f"🧠 The Mind: partida creada con id {game_id}. Dile a tus amigos que me envíen `/join {game_id}` por DM."
         )
+        return base + _the_mind_invite_hint(db, tid, game_id)
     except Exception as e:
         return _telegram_safe(f"No se pudo crear la partida de The Mind: {e}")
 
 
-def execute_join_game(db: Any, chat_id: Any, args: str) -> str:
+def execute_join_game(
+    db: Any,
+    chat_id: Any,
+    args: str,
+    *,
+    requester_id: Any = None,
+    tenant_id: Any = None,
+) -> str:
     """/join <game_id>: añade al jugador (este chat) a la partida indicada."""
     game_id = (args or "").strip()
     if not game_id:
         return _telegram_safe("Uso: /join <game_id>. Ejemplo: /join game_1234")
     try:
-        # Verificar que la partida existe
+        _ensure_the_mind_schema(db)
+        tid = str(tenant_id or "default").strip() or "default"
+        ok, err = _team_allows_user(db, tid, requester_id)
+        if not ok:
+            return _telegram_safe(err)
         rows = list(
             db.execute(
                 "SELECT game_id, status FROM the_mind_games WHERE game_id = ?", (game_id,)
@@ -653,23 +832,10 @@ def execute_join_game(db: Any, chat_id: Any, args: str) -> str:
             )
         cid = str(chat_id).replace("'", "''")[:256]
         uname = get_chat_state(db, chat_id, "username") or ""
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS the_mind_players ("
-            "game_id VARCHAR, "
-            "chat_id VARCHAR, "
-            "username VARCHAR, "
-            "cards INTEGER[], "
-            "is_ready BOOLEAN, "
-            "PRIMARY KEY (game_id, chat_id))"
-        )
-        db.execute(
-            "INSERT OR REPLACE INTO the_mind_players "
-            "(game_id, chat_id, username, cards, is_ready) "
-            "VALUES (?, ?, ?, COALESCE(cards, ARRAY[]::INTEGER[]), COALESCE(is_ready, FALSE))",
-            (game_id, cid, uname, None, None),
-        )
+        rid = str(requester_id or "").strip() or None
+        _merge_the_mind_player(db, game_id, cid, uname, user_id=rid)
         return _telegram_safe(
-            f"✅ Te has unido a la partida {game_id}. Espera a que el crupier la inicie con /start_game."
+            f"✅ Te has unido a la partida {game_id}. Espera a que el anfitrión inicie con `/start_mind {game_id}`."
         )
     except Exception as e:
         return _telegram_safe(f"No se pudo unir a la partida: {e}")
@@ -688,7 +854,7 @@ def execute_start_game(db: Any, chat_id: Any, args: str) -> str:
             )
             if not rows:
                 return _telegram_safe(
-                    "No encontré ninguna partida en estado 'waiting'. Usa /new_game the_mind para crear una."
+                    "No encontré ninguna partida en estado 'waiting'. Usa `/new_mind` o `/new_game the_mind`."
                 )
             game_id = str(rows[0][0])
         rows = list(
@@ -711,16 +877,145 @@ def execute_start_game(db: Any, chat_id: Any, args: str) -> str:
             (game_id,),
         )
         return _telegram_safe(
-            f"🧠 The Mind: partida {game_id} iniciada. El nivel 1 está listo. El crupier usará broadcast_message/deal_cards para coordinar."
+            f"🧠 The Mind: partida {game_id} en estado playing. Reparte cartas con `/start_mind {game_id}` o `/deal`."
         )
     except Exception as e:
         return _telegram_safe(f"No se pudo iniciar la partida: {e}")
 
 
+def execute_start_mind(
+    db: Any,
+    chat_id: Any,
+    args: str,
+    *,
+    requester_id: Any = None,
+    tenant_id: Any = None,
+) -> str:
+    """
+    /start_mind [game_id]: pasa la partida a playing, reparte el Nivel 1 por DM
+    y anuncia por broadcast.
+    """
+    try:
+        _ensure_the_mind_schema(db)
+        tid = str(tenant_id or "default").strip() or "default"
+        ok_host, err_host = _team_allows_user(db, tid, requester_id)
+        if not ok_host:
+            return _telegram_safe(err_host)
+        game_id = (args or "").strip()
+        cid = str(chat_id).replace("'", "''")[:256]
+
+        if not game_id:
+            rows = list(
+                db.execute(
+                    """
+                    SELECT g.game_id
+                    FROM the_mind_games g
+                    JOIN the_mind_players p ON p.game_id = g.game_id
+                    WHERE g.status = 'waiting' AND p.chat_id = ?
+                    ORDER BY g.rowid DESC
+                    LIMIT 1
+                    """,
+                    (cid,),
+                )
+            )
+            if not rows:
+                rows = list(
+                    db.execute(
+                        "SELECT game_id FROM the_mind_games WHERE status = 'waiting' "
+                        "ORDER BY rowid DESC LIMIT 1"
+                    )
+                )
+            if not rows:
+                return _telegram_safe(
+                    "No encontré ninguna partida en espera. Usa `/new_mind` o `/new_game the_mind`."
+                )
+            game_id = str(rows[0][0])
+
+        rows = list(
+            db.execute(
+                "SELECT status FROM the_mind_games WHERE game_id = ?", (game_id,)
+            )
+        )
+        if not rows:
+            return _telegram_safe(f"No existe ninguna partida con id {game_id}.")
+        status = str(rows[0][0] or "").strip().lower()
+        if status != "waiting":
+            return _telegram_safe(
+                f"La partida {game_id} no está en espera (estado: {status or 'desconocido'}). "
+                "Solo se puede `/start_mind` desde 'waiting'."
+            )
+
+        n_players = list(
+            db.execute(
+                "SELECT COUNT(*) FROM the_mind_players WHERE game_id = ?", (game_id,)
+            )
+        )
+        count = int(n_players[0][0]) if n_players else 0
+        if count < 1:
+            return _telegram_safe("No hay jugadores en esta partida.")
+
+        ok_roster, err_roster = _all_mind_players_in_team(db, game_id, tid)
+        if not ok_roster:
+            return _telegram_safe(err_roster)
+
+        db.execute(
+            "UPDATE the_mind_games SET status = 'playing', current_level = 1, "
+            "cards_played = ARRAY[]::INTEGER[] WHERE game_id = ?",
+            (game_id,),
+        )
+        deal_cards_for_level(db, game_id, 1)
+        broadcast_message_to_players(
+            db,
+            game_id,
+            "¡El Nivel 1 ha comenzado! Concéntrense... 🤫",
+        )
+        return _telegram_safe(
+            f"🧠 Partida {game_id} iniciada: Nivel 1 repartido por DM y anunciado a los jugadores."
+        )
+    except Exception as e:
+        return _telegram_safe(f"No se pudo iniciar The Mind: {e}")
+
+
 def execute_deal(db: Any, chat_id: Any, args: str) -> str:
-    """/deal: reparte cartas para el nivel actual (stub, sin lógica completa)."""
-    # Implementación mínima: solo mensaje de placeholder; la lógica real se añadirá después.
-    return _telegram_safe("🃏 (stub) Cartas repartidas por DM a cada jugador. La lógica completa de The Mind se implementará en una iteración posterior.")
+    """/deal [game_id]: reparte cartas según current_level de la partida en juego."""
+    try:
+        _ensure_the_mind_schema(db)
+        game_id = (args or "").strip()
+        cid = str(chat_id).replace("'", "''")[:256]
+        if not game_id:
+            rows = list(
+                db.execute(
+                    """
+                    SELECT g.game_id, g.current_level
+                    FROM the_mind_games g
+                    JOIN the_mind_players p ON p.game_id = g.game_id
+                    WHERE g.status = 'playing' AND p.chat_id = ?
+                    ORDER BY g.rowid DESC
+                    LIMIT 1
+                    """,
+                    (cid,),
+                )
+            )
+            if not rows:
+                return _telegram_safe(
+                    "No hay partida en juego para este chat. Usa `/join` y `/start_mind` primero."
+                )
+            game_id = str(rows[0][0])
+            lvl = int(rows[0][1] or 1)
+        else:
+            lr = list(
+                db.execute(
+                    "SELECT current_level FROM the_mind_games WHERE game_id = ? AND status = 'playing'",
+                    (game_id,),
+                )
+            )
+            if not lr:
+                return _telegram_safe(f"No hay partida en juego con id {game_id}.")
+            lvl = int(lr[0][0] or 1)
+        out = deal_cards_for_level(db, game_id, lvl)
+        return _telegram_safe(f"🃏 {out}")
+    except Exception as e:
+        return _telegram_safe(f"No se pudo repartir: {e}")
 
 
 def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
@@ -736,12 +1031,16 @@ def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
         return _telegram_safe("La carta debe estar entre 1 y 100.")
 
     cid = str(chat_id).replace("'", "''")[:256]
+    uname = get_chat_state(db, chat_id, "username") or ""
+    uname_display = f"@{uname}" if uname else "Un jugador"
+
     try:
-        # Encontrar la partida en juego donde participa este chat
+        _ensure_the_mind_schema(db)
+        _mind_tx_begin(db)
         rows = list(
             db.execute(
                 """
-                SELECT g.game_id, g.cards_played, g.current_level
+                SELECT g.game_id, g.cards_played, g.current_level, g.status
                 FROM the_mind_games g
                 JOIN the_mind_players p ON g.game_id = p.game_id
                 WHERE g.status = 'playing' AND p.chat_id = ?
@@ -752,13 +1051,14 @@ def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
             )
         )
         if not rows:
+            _mind_tx_rollback(db)
             return _telegram_safe(
-                "No encontré ninguna partida en juego asociada a este chat. Asegúrate de haber usado /join <game_id> y /start_game."
+                "No encontré ninguna partida en juego asociada a este chat. "
+                "Usa `/join` y `/start_mind`."
             )
-        game_id, cards_played_arr, current_level = rows[0]
+        game_id, cards_played_arr, current_level, _st = rows[0]
         cards_played = list(cards_played_arr or [])
 
-        # Obtener la mano del jugador
         prow = list(
             db.execute(
                 "SELECT cards FROM the_mind_players WHERE game_id = ? AND chat_id = ?",
@@ -766,24 +1066,25 @@ def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
             )
         )
         if not prow:
+            _mind_tx_rollback(db)
             return _telegram_safe(
-                "No encontré tu mano en esta partida. Asegúrate de haberte unido y que el crupier haya repartido cartas."
+                "No encontré tu mano en esta partida. Espera a que se repartan cartas con `/start_mind`."
             )
         hand = list(prow[0][0] or [])
         if num not in hand:
+            _mind_tx_rollback(db)
             return _telegram_safe(
                 f"No tienes la carta {num} en tu mano actual. Verifica tus cartas privadas."
             )
 
-        # Validación simple: comprobar si existe alguna carta menor en manos de otros jugadores
         lower_exists = False
         other_rows = list(
             db.execute(
-                "SELECT cards FROM the_mind_players WHERE game_id = ? AND chat_id <> ?",
+                "SELECT chat_id, cards FROM the_mind_players WHERE game_id = ? AND chat_id <> ?",
                 (game_id, cid),
             )
         )
-        for (ocards,) in other_rows:
+        for _ochat, ocards in other_rows:
             if ocards:
                 for c in ocards:
                     if c < num:
@@ -792,11 +1093,7 @@ def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
             if lower_exists:
                 break
 
-        uname = get_chat_state(db, chat_id, "username") or ""
-        uname_display = f"@{uname}" if uname else "Un jugador"
-
         if lower_exists:
-            # Error: alguien tenía una carta menor sin jugar -> perder una vida y limpiar cartas menores
             life_row = list(
                 db.execute(
                     "SELECT lives FROM the_mind_games WHERE game_id = ?", (game_id,)
@@ -804,22 +1101,39 @@ def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
             )
             lives = int(life_row[0][0] or 0) if life_row else 0
             new_lives = max(lives - 1, 0)
-            # Eliminar todas las cartas < num de todas las manos
-            db.execute(
-                "UPDATE the_mind_players "
-                "SET cards = list_filter(cards, ?) "
-                "WHERE game_id = ?",
-                (num, game_id),
+
+            all_hands = list(
+                db.execute(
+                    "SELECT chat_id, cards FROM the_mind_players WHERE game_id = ?",
+                    (game_id,),
+                )
             )
+            for pch, pcards in all_hands:
+                raw = list(pcards or [])
+                new_hand = [c for c in raw if c >= num]
+                db.execute(
+                    "UPDATE the_mind_players SET cards = ? WHERE game_id = ? AND chat_id = ?",
+                    (new_hand, game_id, pch),
+                )
             db.execute(
                 "UPDATE the_mind_games SET lives = ? WHERE game_id = ?",
                 (new_lives, game_id),
             )
+            _mind_tx_commit(db)
+            try:
+                broadcast_message_to_players(
+                    db,
+                    game_id,
+                    f"❌ Error de sincronía: {uname_display} jugó {num} con cartas menores en juego. "
+                    f"Pierden 1 vida (restantes: {new_lives}).",
+                )
+            except Exception:
+                pass
             return _telegram_safe(
-                f"❌ ¡ERROR! {uname_display} jugó el {num}, pero alguien tenía una carta menor. Pierden 1 vida. Vidas restantes: {new_lives}."
+                f"❌ ¡ERROR! {uname_display} jugó el {num}, pero alguien tenía una carta menor. "
+                f"Pierden 1 vida. Vidas restantes: {new_lives}."
             )
 
-        # Éxito: mover carta a cards_played y quitarla de la mano del jugador
         hand.remove(num)
         db.execute(
             "UPDATE the_mind_players SET cards = ? WHERE game_id = ? AND chat_id = ?",
@@ -832,10 +1146,51 @@ def execute_play_mind(db: Any, chat_id: Any, args: str) -> str:
             (cards_played_sorted, game_id),
         )
 
-        return _telegram_safe(
-            f"✅ {uname_display} jugó el {num}. Cartas jugadas hasta ahora: {cards_played_sorted}."
+        lvl_now = int(current_level or 1)
+        hands_after = list(
+            db.execute("SELECT cards FROM the_mind_players WHERE game_id = ?", (game_id,))
         )
+        level_done = all(len(list(h[0] or [])) == 0 for h in hands_after)
+
+        _mind_tx_commit(db)
+
+        msg = (
+            f"✅ {uname_display} jugó el {num}. Cartas jugadas en este nivel: {cards_played_sorted}."
+        )
+
+        if level_done:
+            if lvl_now >= _THE_MIND_MAX_LEVEL:
+                db.execute(
+                    "UPDATE the_mind_games SET status = 'won' WHERE game_id = ?",
+                    (game_id,),
+                )
+                broadcast_message_to_players(
+                    db,
+                    game_id,
+                    f"🏆 ¡Victoria! Han completado los {_THE_MIND_MAX_LEVEL} niveles.",
+                )
+                msg += " 🏆 ¡Victoria final!"
+            else:
+                next_lvl = lvl_now + 1
+                db.execute(
+                    "UPDATE the_mind_games SET cards_played = ARRAY[]::INTEGER[] WHERE game_id = ?",
+                    (game_id,),
+                )
+                deal_cards_for_level(db, game_id, next_lvl)
+                broadcast_message_to_players(
+                    db,
+                    game_id,
+                    f"🎉 ¡Nivel {lvl_now} superado! Comienza el Nivel {next_lvl}.",
+                )
+                msg += f" 🎉 ¡Nivel {lvl_now} completado! Repartido el Nivel {next_lvl}."
+            return _telegram_safe(msg)
+
+        return _telegram_safe(msg)
     except Exception as e:
+        try:
+            _mind_tx_rollback(db)
+        except Exception:
+            pass
         return _telegram_safe(f"No se pudo registrar la jugada: {e}")
 
 def execute_context_toggle(db: Any, chat_id: Any, on_off: str) -> str:
@@ -1301,6 +1656,10 @@ def execute_help(db: Any, chat_id: Any) -> str:
         (_telegram_safe("/sandox"), _telegram_safe("(Alias) /sandbox para tolerar errores de escritura.")),
         (_telegram_safe("/audit"), _telegram_safe("Última auditoría de ejecución")),
         (_telegram_safe("/health"), _telegram_safe("Estado del servicio")),
+        (_telegram_safe("/new_mind"), _telegram_safe("The Mind: crear partida (alias de /new_game the_mind)")),
+        (_telegram_safe("/join <game_id>"), _telegram_safe("The Mind: unirse a partida")),
+        (_telegram_safe("/start_mind [game_id]"), _telegram_safe("The Mind: iniciar y repartir Nivel 1")),
+        (_telegram_safe("/play <n>"), _telegram_safe("The Mind: jugar carta")),
         (_telegram_safe("/setup"), _telegram_safe("Config key=value")),
         (_telegram_safe("/approve"), _telegram_safe("Aprobar última acción")),
         (_telegram_safe("/reject"), _telegram_safe("Rechazar última acción")),
@@ -1309,22 +1668,25 @@ def execute_help(db: Any, chat_id: Any) -> str:
     return f"🦆 {_telegram_safe('Fly commands:')}\n\n{block}"
 
 
-def handle_command(
+def _fly_reply_preview(s: str, max_len: int = 120) -> str:
+    """Resumen de respuesta para [FLY] sin volcar secretos ni bloques enormes."""
+    t = (s or "").replace("\n", " ").strip()
+    if len(t) > max_len:
+        return t[:max_len] + "..."
+    return t
+
+
+def _dispatch_fly_command(
     db: Any,
     chat_id: Any,
-    text: str,
+    name: str,
+    args: str,
     *,
     requester_id: Any = None,
     tenant_id: Any = None,
     vault_user_id: Any = None,
 ) -> Optional[str]:
-    """
-    Middleware: si el mensaje es un comando on-the-fly, ejecuta y retorna la respuesta.
-    Si no es comando o no es manejado, retorna None.
-    """
-    name, args = parse_command(text)
-    if not name:
-        return None
+    """Ejecuta un comando fly ya parseado (sin contexto de logging)."""
     if name == "help":
         return execute_help(db, chat_id)
     if name == "role":
@@ -1344,11 +1706,21 @@ def handle_command(
     if name == "forget":
         return execute_forget(db, chat_id)
     if name == "start_mind":
-        return execute_start_mind(db, chat_id)
+        return execute_start_mind(
+            db, chat_id, args, requester_id=requester_id, tenant_id=tenant_id
+        )
+    if name == "new_mind":
+        return execute_new_game(
+            db, chat_id, "the_mind", requester_id=requester_id, tenant_id=tenant_id
+        )
     if name == "new_game":
-        return execute_new_game(db, chat_id, args)
+        return execute_new_game(
+            db, chat_id, args, requester_id=requester_id, tenant_id=tenant_id
+        )
     if name == "join":
-        return execute_join_game(db, chat_id, args)
+        return execute_join_game(
+            db, chat_id, args, requester_id=requester_id, tenant_id=tenant_id
+        )
     if name == "start_game":
         return execute_start_game(db, chat_id, args)
     if name == "deal":
@@ -1380,6 +1752,43 @@ def handle_command(
     if name == "history":
         return execute_history(db, chat_id, args)
     return None
+
+
+def handle_command(
+    db: Any,
+    chat_id: Any,
+    text: str,
+    *,
+    requester_id: Any = None,
+    tenant_id: Any = None,
+    vault_user_id: Any = None,
+) -> Optional[str]:
+    """
+    Middleware: si el mensaje es un comando on-the-fly, ejecuta y retorna la respuesta.
+    Si no es comando o no es manejado, retorna None.
+    """
+    name, args = parse_command(text)
+    if not name:
+        return None
+    tid = str(tenant_id or "default").strip() or "default"
+    try:
+        cid = str(chat_id if chat_id is not None else "unknown").strip() or "unknown"
+    except Exception:
+        cid = "unknown"
+    _fly_log = get_obs_logger("duckclaw.fly")
+    with structured_log_context(tenant_id=tid, worker_id="gateway", chat_id=cid):
+        out = _dispatch_fly_command(
+            db,
+            chat_id,
+            name,
+            args,
+            requester_id=requester_id,
+            tenant_id=tenant_id,
+            vault_user_id=vault_user_id,
+        )
+        if out is not None:
+            log_fly(_fly_log, "/%s -> %s", name, _fly_reply_preview(out))
+        return out
 
 
 def _execute_setup(db: Any, chat_id: Any, args: str) -> str:

@@ -27,6 +27,11 @@ def cmd_serve(
         "-n",
         help="Nombre del servicio PM2 (default: DuckClaw-Gateway con --gateway, DuckClaw-API si no).",
     ),
+    delete_pm2_name: str = typer.Option(
+        None,
+        "--delete-pm2-name",
+        help="Con --pm2: elimina este proceso PM2 antes de arrancar (p. ej. al renombrar el Gateway).",
+    ),
     reload: bool = typer.Option(False, "--reload", help="Recargar al cambiar código (solo sin --pm2)."),
 ) -> None:
     """Arranca el API Gateway o el servidor LangGraph."""
@@ -49,6 +54,7 @@ def cmd_serve(
         name=effective_name,
         cwd=str(repo),
         gateway=gateway,
+        delete_pm2_name=(delete_pm2_name.strip() if delete_pm2_name else None),
     )
     if code != 0:
         raise typer.Exit(code)

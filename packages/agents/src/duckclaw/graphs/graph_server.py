@@ -11,7 +11,7 @@ Uso directo:
 
 Via duckops:
   duckops serve --port 8123
-  duckops serve --pm2 --name DuckClaw-API
+  duckops serve --pm2 --name DuckClaw-API   # genera config/ecosystem.graph_api.config.cjs
 
 Endpoints:
   GET  /             → info del grafo y configuración activa
@@ -55,7 +55,9 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 import logging as _logging
+from functools import partial
 
+from duckclaw.utils.langsmith_trace import get_tracing_config
 from duckclaw.utils.logger import (
     configure_structured_logging,
     extract_usage_from_messages,
@@ -381,7 +383,10 @@ async def _ainvoke(
     """
     import asyncio
 
+    # `input` primero: LangSmith suele usar esta clave para la columna **Input** en la tabla Runs
+    # (convención LangChain). `incoming` sigue siendo la fuente de verdad en el grafo.
     state = {
+        "input": message,
         "incoming": message,
         "history": history or [],
         "chat_id": chat_id,
@@ -393,10 +398,11 @@ async def _ainvoke(
         state["is_system_prompt"] = True
     loop = asyncio.get_event_loop()
 
+    trace_cfg = get_tracing_config(tenant_id, "manager", chat_id)
     if hasattr(graph, "ainvoke"):
-        result = await graph.ainvoke(state)
+        result = await graph.ainvoke(state, trace_cfg)
     else:
-        result = await loop.run_in_executor(None, graph.invoke, state)
+        result = await loop.run_in_executor(None, partial(graph.invoke, state, trace_cfg))
 
     reply = str(result.get("reply") or result.get("output") or "Sin respuesta.")
     messages = result.get("messages")

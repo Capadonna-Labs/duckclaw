@@ -1,0 +1,73 @@
+{
+  "name": "DuckClaw: Centralized Egress Service",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "send-notification",
+        "options": {}
+      },
+      "id": "webhook-egress",
+      "name": "Webhook: Outbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.body.type }}",
+              "value2": "image"
+            }
+          ]
+        }
+      },
+      "id": "switch-type",
+      "name": "Is Image?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.body.chat_id }}",
+        "text": "={{ $json.body.text }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "reply_markup": "={{ $json.body.buttons ? JSON.stringify({ inline_keyboard: $json.body.buttons }) : '' }}"
+        }
+      },
+      "id": "send-text",
+      "name": "Telegram: Send Text/Buttons",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [440, -100]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.body.chat_id }}",
+        "photo": "={{ $json.body.file_url }}",
+        "additionalFields": {
+          "caption": "={{ $json.body.text }}"
+        }
+      },
+      "id": "send-photo",
+      "name": "Telegram: Send Photo",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [440, 100]
+    }
+  ],
+  "connections": {
+    "Webhook: Outbound": {
+      "main": [[{ "node": "Is Image?", "type": "main", "index": 0 }]]
+    },
+    "Is Image?": {
+      "main": [
+        [{ "node": "Telegram: Send Photo", "type": "main", "index": 0 }],
+        [{ "node": "Telegram: Send Text/Buttons", "type": "main", "index": 0 }]
+      ]
+    }
+  }
+}

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
+
+_gateway_db_singleton: Any = None
 
 
 def get_gateway_db_path() -> str:
@@ -21,3 +24,20 @@ def get_gateway_db_path() -> str:
     if path:
         return path
     return os.environ.get("DUCKDB_PATH", "db/duckclaw.duckdb").strip() or "db/duckclaw.duckdb"
+
+
+def get_gateway_db() -> Any:
+    """
+    Instancia DuckClaw apuntando a la misma ruta que el API Gateway (legacy / herramientas sin db inyectada).
+
+    Preferir pasar la conexión de la bóveda activa cuando el contexto sea multi-vault.
+    """
+    global _gateway_db_singleton
+    if _gateway_db_singleton is not None:
+        return _gateway_db_singleton
+    from duckclaw import DuckClaw
+
+    path = get_gateway_db_path()
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    _gateway_db_singleton = DuckClaw(path)
+    return _gateway_db_singleton

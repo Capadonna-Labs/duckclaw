@@ -21,7 +21,7 @@ try:
 except ImportError:
     RunnableConfig = Any  # type: ignore[misc, assignment]
 
-from duckclaw.utils.logger import log_tool_execution_sync
+from duckclaw.utils.logger import log_tool_execution_sync, set_log_context
 from duckclaw.workers.manifest import WorkerSpec, load_manifest, get_worker_dir
 from duckclaw.workers.loader import load_system_prompt, load_skills, run_schema
 
@@ -39,6 +39,15 @@ _CONCRETE_TASK_KEYWORDS = re.compile(
 )
 
 # Tarea explícita del manager (plan): nunca tratar como "sin tarea"
+def _worker_log_label(worker_id: str) -> str:
+    """Etiqueta corta solo para texto de log (no sustituye el id real del estado)."""
+    w = (worker_id or "").strip()
+    low = w.lower().replace("_", "")
+    if low == "themindcrupier":
+        return "crupier"
+    return w or "worker"
+
+
 _PLANNED_TASK_PREFIX = (
     "TAREA:",
     "TAREA ",
@@ -537,6 +546,10 @@ def build_worker_graph(
             return any(k in t for k in ("tablas", "tabla", "duckdb", "esquema", "schema", "estructura", "qué tablas", "que tablas"))
 
         def agent_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
+            _chat_ctx = state.get("chat_id") or state.get("session_id") or "default"
+            _tenant_ctx = (state.get("tenant_id") or "").strip() or "default"
+            set_log_context(tenant_id=_tenant_ctx, worker_id=worker_id, chat_id=str(_chat_ctx).strip() or "default")
+            _wl = _worker_log_label(worker_id)
             cfg = config or {}
             incoming = (
                 (state.get("incoming") or state.get("input") or "").strip()
@@ -564,7 +577,8 @@ def build_worker_graph(
             sandbox_enabled = _sandbox_enabled_for_state(state)
             llm_with_tools = llm_with_tools_on if sandbox_enabled else llm_with_tools_off
             _log.info(
-                "[finanz] incoming=%r | is_schema=%s | is_portfolio=%s | forced_tool=%s",
+                "[%s] incoming=%r | is_schema=%s | is_portfolio=%s | forced_tool=%s",
+                _wl,
                 incoming[:80] + ("..." if len(incoming) > 80 else ""),
                 is_schema,
                 is_portfolio,
@@ -580,12 +594,16 @@ def build_worker_graph(
                 resp = llm_with_tools.invoke(state["messages"])
             tool_calls = getattr(resp, "tool_calls", None) or []
             if tool_calls:
-                _log.info("[finanz] LLM tool_calls=%s", [tc.get("name") for tc in tool_calls])
+                _log.info("[%s] LLM tool_calls=%s", _wl, [tc.get("name") for tc in tool_calls])
             out = {"messages": state["messages"] + [resp]}
             out.update(_identity_fields(state))
             return out
 
     def tools_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
+        _chat_ctx = state.get("chat_id") or state.get("session_id") or "default"
+        _tenant_ctx = (state.get("tenant_id") or "").strip() or "default"
+        set_log_context(tenant_id=_tenant_ctx, worker_id=worker_id, chat_id=str(_chat_ctx).strip() or "default")
+        _wl = _worker_log_label(worker_id)
         messages = state["messages"]
         last = messages[-1]
         tool_calls = getattr(last, "tool_calls", None) or []
@@ -601,16 +619,16 @@ def build_worker_graph(
                 try:
                     result = tool.invoke(args)
                     content = str(result) if result is not None else "OK"
-                    _log.info("[finanz] tool=%s | result_len=%d | preview=%r", name, len(content), content[:120] + ("..." if len(content) > 120 else ""))
+                    _log.info("[%s] tool=%s | result_len=%d | preview=%r", _wl, name, len(content), content[:120] + ("..." if len(content) > 120 else ""))
                 except Exception as e:
                     content = f"Error: {e}"
-                    _log.warning("[finanz] tool=%s failed: %s", name, e)
+                    _log.warning("[%s] tool=%s failed: %s", _wl, name, e)
             else:
                 if not sandbox_enabled and name == "run_sandbox":
                     content = "Sandbox deshabilitado en esta sesión. Actívalo con /sandbox on."
                 else:
                     content = f"Herramienta desconocida: {name}"
-                _log.warning("[finanz] unknown/unavailable tool: %s (sandbox_enabled=%s)", name, sandbox_enabled)
+                _log.warning("[%s] unknown/unavailable tool: %s (sandbox_enabled=%s)", _wl, name, sandbox_enabled)
             new_msgs.append(ToolMessage(content=content, tool_call_id=tid, name=name))
         out = {"messages": new_msgs}
         out.update(_identity_fields(state))

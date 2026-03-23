@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any
 
@@ -133,16 +132,6 @@ def build_general_graph(
             )
         )
 
-    # Memoria triple (plantilla industry v3.0): tool explícita o si DUCKCLAW_INDUSTRY_TEMPLATE está definido
-    _industry_tpl = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
-    if "unified_memory" in tool_names_set or _industry_tpl:
-        try:
-            from duckclaw.forge.skills.unified_memory_orchestrator import make_unified_memory_tool
-
-            tools.append(make_unified_memory_tool(db))
-        except Exception as e:
-            _log.warning("unified_memory: no se pudo registrar la herramienta: %s", e)
-
     # Sandbox (Strix) — solo si está en tools_spec y Docker está disponible
     if "run_sandbox" in tool_names_set:
         try:
@@ -198,15 +187,18 @@ def build_general_graph(
         except Exception:
             pass
 
-    # The Mind broadcasting / reparto de cartas — opcional vía tools_spec
+    # The Mind broadcasting / reparto de cartas — opcional vía tools_spec (db = bóveda del grafo)
     if "broadcast_message" in tool_names_set or "deal_cards" in tool_names_set:
         try:
-            from duckclaw.forge.skills.broadcast import broadcast_message, deal_cards
+            from duckclaw.forge.skills.the_mind_outbound import (
+                make_broadcast_message_tool,
+                make_deal_cards_tool,
+            )
 
             if "broadcast_message" in tool_names_set:
-                tools.append(broadcast_message)
+                tools.append(make_broadcast_message_tool(db))
             if "deal_cards" in tool_names_set:
-                tools.append(deal_cards)
+                tools.append(make_deal_cards_tool(db))
         except Exception:
             pass
 

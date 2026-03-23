@@ -11,23 +11,7 @@ Antes de invocar el Wizard, el entorno host debe contar con:
 
 ## 3. Flujo de Ejecución del Wizard (`duckops init`)
 
-El comando de entrada es `uv run duckops init`. Opcionalmente, **plantilla industry (Memoria Triple v3.0)**:
-
-```bash
-# Tenant "mi_empresa" + plantilla business_standard (DDL SQL + duckpgq + VSS)
-uv run duckops init mi_empresa --industry business_standard
-```
-
-Variables que el CLI inyecta al wizard (y que el wizard puede persistir en `.env` al guardar):
-
-| Variable | Uso |
-| :--- | :--- |
-| `DUCKCLAW_TENANT_ID` | Identificador Multi-Vault; bóveda por defecto en `db/private/<tenant>/default.duckdb`. |
-| `DUCKCLAW_INDUSTRY_TEMPLATE` | ID de plantilla bajo `forge/templates/industries/<id>/` (p. ej. `business_standard`). Al guardar, el wizard **alinea** `DUCKCLAW_DB_PATH` a `db/private/<tenant>/default.duckdb` (misma DB donde se aplica schema triple + seeds + `agent_config`). |
-
-**Nota:** `INSTALL duckpgq` / `INSTALL vss` pueden requerir red; en entornos offline el loader registra advertencias y continúa con lo que pueda aplicarse.
-
-El flujo interactivo se divide en 4 fases críticas:
+El comando de entrada es `uv run duckops init`. El flujo interactivo se divide en 4 fases críticas:
 
 ### Fase 0: Detección de Estado (State Awareness)
 *   **Lógica:** El Wizard escanea el sistema operativo buscando gestores de procesos (`pm2 jlist` o `systemctl`).

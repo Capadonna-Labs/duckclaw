@@ -1,4 +1,8 @@
 # Raíz del monorepo DuckClaw — dependencias para scripts y servicios locales (p. ej. pipeline Singleton Writer)
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "duckclaw"
 version = "0.0.1"
@@ -17,6 +21,13 @@ dependencies = [
     "duckclaw-shared",
     "langchain-openai>=0.3.35",
 ]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=21.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["duckclaw_workspace*"]
 
 [tool.uv.sources]
 duckops = { path = "packages/duckops", editable = true }

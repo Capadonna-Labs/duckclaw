@@ -8,6 +8,8 @@ try:
     from duckclaw._duckclaw import DuckClaw
 except ImportError:
     import json
+    from typing import Any
+
     import duckdb
 
     class DuckClaw:
@@ -24,16 +26,13 @@ except ImportError:
             out = [dict(zip(names, (str(v) for v in row))) for row in rows]
             return json.dumps(out, ensure_ascii=False)
 
-        def execute(self, sql: str, params=None) -> None:
-            """Ejecuta comandos sin retorno (INSERT, UPDATE, CREATE).
-
-            Acepta opcionalmente parámetros para compatibilidad con llamadas que usan
-            db.execute(sql, params).
-            """
+        def execute(self, sql: str, params=None) -> Any:
+            """Ejecuta SQL y devuelve filas vía fetchall() (API duckdb: execute devuelve la conexión)."""
             if params is not None:
                 self._con.execute(sql, params)
             else:
                 self._con.execute(sql)
+            return self._con.fetchall()
 
         def get_version(self) -> str:
             return str(self._con.execute("SELECT version()").fetchone()[0])

@@ -232,9 +232,12 @@ def _langsmith_log(report: dict[str, Any]) -> None:
             return
         from langsmith import Client
 
+        from duckclaw.utils.langsmith_trace import create_completed_langsmith_run
+
         client = Client(api_key=api_key)
-        client.create_run(
-            name="model_guard_evaluation",
+        create_completed_langsmith_run(
+            client,
+            name="ModelGuard",
             run_type="chain",
             inputs={"model_guard": True},
             outputs=report,

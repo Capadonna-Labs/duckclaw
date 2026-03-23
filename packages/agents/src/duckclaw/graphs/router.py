@@ -18,6 +18,10 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from langchain_core.runnables import RunnableConfig
+
+from duckclaw.utils.langsmith_trace import get_tracing_config
+
 # Tablas mínimas para considerar la DB como Olist (BI agent)
 _OLIST_REQUIRED = {"olist_orders", "olist_order_items", "olist_sellers"}
 
@@ -251,11 +255,15 @@ def build_entry_router_graph(
             out["graph_context"] = state.get("graph_context") or ""
         return out
 
-    def retail_node(state: dict) -> dict:
+    def retail_node(state: dict, config: RunnableConfig) -> dict:
         assert retail_graph is not None
-        result = retail_graph.invoke({
-            "incoming": state.get("incoming", ""),
-        })
+        tc = get_tracing_config("default", "router:retail", "unknown", base=config)
+        result = retail_graph.invoke(
+            {
+                "incoming": state.get("incoming", ""),
+            },
+            tc,
+        )
         return {"reply": result.get("reply") or "Sin respuesta."}
 
     def _store_name_from_prompt(prompt: str) -> str:
@@ -265,7 +273,7 @@ def build_entry_router_graph(
         m = re.search(r"asistente\s+de\s+([^,.\n]+?)(?:\s*,\s*una\s+tienda|\s*\.|$)", prompt, re.I)
         return (m.group(1).strip() or "Lumi Store") if m else "Lumi Store"
 
-    def general_node(state: dict) -> dict:
+    def general_node(state: dict, config: RunnableConfig) -> dict:
         incoming = (state.get("incoming") or "").strip()
         # Preguntas sobre nombre de la tienda → respuesta directa
         if re.search(r"\b(nombre\s+de\s+la\s+tienda|c[oó]mo\s+se\s+llama\s+la\s+tienda|qu[eé]\s+tienda\s+es|nombre\s+tienda)\b", incoming, re.I):
@@ -307,11 +315,15 @@ def build_entry_router_graph(
                     return {"reply": reply or "Sin respuesta."}
             except Exception as e:
                 return {"reply": f"Error BI: {e}"}
-        result = general_graph.invoke({
-            "incoming": incoming,
-            "history": state.get("history") or [],
-            "graph_context": state.get("graph_context") or "",
-        })
+        tc = get_tracing_config("default", "router:general", "unknown", base=config)
+        result = general_graph.invoke(
+            {
+                "incoming": incoming,
+                "history": state.get("history") or [],
+                "graph_context": state.get("graph_context") or "",
+            },
+            tc,
+        )
         out = {"reply": result.get("reply") or "Sin respuesta."}
         if result.get("messages"):
             out["messages"] = result["messages"]

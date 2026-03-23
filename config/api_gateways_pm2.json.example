@@ -1,0 +1,23 @@
+{
+  "apps": [
+    {
+      "name": "TheMind-Gateway",
+      "host": "0.0.0.0",
+      "port": 8080,
+      "env": {
+        "DUCKCLAW_PM2_PROCESS_NAME": "TheMind-Gateway",
+        "PYTHONPATH": "/path/to/duckclaw",
+        "LANGCHAIN_TRACING_V2": "true",
+        "LANGCHAIN_API_KEY": "<LANGSMITH_OR_LANGCHAIN_API_KEY>",
+        "LANGCHAIN_PROJECT": "Finanz",
+        "DUCKCLAW_LLM_PROVIDER": "deepseek",
+        "DUCKCLAW_LLM_MODEL": "deepseek-chat",
+        "DUCKCLAW_LLM_BASE_URL": "https://api.deepseek.com/",
+        "DUCKCLAW_DB_PATH": "/path/to/db.duckdb",
+        "DEEPSEEK_API_KEY": "<DEEPSEEK_API_KEY>",
+        "DUCKCLAW_REDIS_URL": "redis://localhost:6379/0",
+        "REDIS_URL": "redis://localhost:6379/0"
+      }
+    }
+  ]
+}

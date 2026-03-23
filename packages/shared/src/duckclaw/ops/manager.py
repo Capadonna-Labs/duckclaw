@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import sys
@@ -251,6 +252,219 @@ def status(provider: str = "auto", name: Optional[str] = None) -> int:
     return 1
 
 
+API_GATEWAYS_PM2_JSON = "config/api_gateways_pm2.json"
+
+
+def _api_gateways_json_path(effective_cwd: str) -> Path:
+    return Path(effective_cwd) / API_GATEWAYS_PM2_JSON
+
+
+def _load_merged_gateway_apps(effective_cwd: str) -> list[dict[str, Any]]:
+    path = _api_gateways_json_path(effective_cwd)
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        apps = data.get("apps", [])
+        return apps if isinstance(apps, list) else []
+    except Exception:
+        return []
+
+
+def _save_merged_gateway_apps(effective_cwd: str, apps: list[dict[str, Any]]) -> None:
+    path = _api_gateways_json_path(effective_cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"apps": apps}, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _env_dict_for_json(env: dict[str, Any]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for k, v in env.items():
+        if v is None:
+            continue
+        out[str(k)] = str(v)
+    return out
+
+
+def _upsert_gateway_app(
+    apps: list[dict[str, Any]],
+    *,
+    name: str,
+    host: str,
+    port: int,
+    env_vars: dict[str, Any],
+) -> list[dict[str, Any]]:
+    payload = {
+        "name": name,
+        "host": host,
+        "port": port,
+        "env": _env_dict_for_json(env_vars),
+    }
+    for i, a in enumerate(apps):
+        if isinstance(a, dict) and (a.get("name") or "").strip() == name:
+            apps[i] = payload
+            return apps
+    apps.append(payload)
+    return apps
+
+
+def _compute_gateway_cluster_maps(
+    apps: list[dict[str, Any]], effective_cwd: str
+) -> tuple[dict[int, list[str]], dict[str, list[str]]]:
+    """Índices puerto→nombres y ruta DuckDB resuelta→nombres (para detectar conflictos)."""
+    root = Path(effective_cwd).resolve()
+    by_port: dict[int, list[str]] = {}
+    by_db: dict[str, list[str]] = {}
+    for a in apps:
+        if not isinstance(a, dict):
+            continue
+        n = (a.get("name") or "").strip()
+        if not n:
+            continue
+        p = int(a.get("port") or 0)
+        if p > 0:
+            by_port.setdefault(p, []).append(n)
+        env = a.get("env") or {}
+        if not isinstance(env, dict):
+            env = {}
+        dbp = (env.get("DUCKCLAW_DB_PATH") or "").strip()
+        if dbp:
+            try:
+                dp = Path(dbp)
+                if not dp.is_absolute():
+                    dp = root / dp
+                db_key = str(dp.resolve())
+            except Exception:
+                db_key = dbp
+            by_db.setdefault(db_key, []).append(n)
+    return by_port, by_db
+
+
+def analyze_gateway_cluster_conflicts(effective_cwd: str) -> dict[str, Any]:
+    """
+    Lee config/api_gateways_pm2.json y devuelve conflictos (puerto o DuckDB duplicados).
+    Útil para el wizard o herramientas que necesitan datos estructurados.
+    """
+    apps = _load_merged_gateway_apps(effective_cwd)
+    by_port, by_db = _compute_gateway_cluster_maps(apps, effective_cwd)
+    dup_ports = {p: names for p, names in by_port.items() if len(names) > 1}
+    dup_dbs = {k: names for k, names in by_db.items() if len(names) > 1}
+    return {
+        "cwd": effective_cwd,
+        "apps": apps,
+        "duplicate_ports": dup_ports,
+        "duplicate_databases": dup_dbs,
+        "has_conflicts": bool(dup_ports or dup_dbs),
+    }
+
+
+def save_gateway_cluster_config(effective_cwd: str, apps: list[dict[str, Any]]) -> None:
+    """
+    Persiste la lista fusionada en config/api_gateways_pm2.json y regenera
+    config/ecosystem.api.config.cjs (mismo criterio que `duckops serve --pm2 --gateway`).
+    """
+    _warn_gateway_cluster_conflicts(apps, effective_cwd)
+    _save_merged_gateway_apps(effective_cwd, apps)
+    python_path = _resolve_python()
+    config_path = Path(effective_cwd) / "config" / "ecosystem.api.config.cjs"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_content = _render_gateway_ecosystem_cjs(python_path, effective_cwd, apps)
+    config_path.write_text(config_content, encoding="utf-8")
+    print(
+        f"✅  {API_GATEWAYS_PM2_JSON} + ecosystem.api.config.cjs ({len(apps)} gateway(s))",
+        flush=True,
+    )
+
+
+def _warn_gateway_cluster_conflicts(apps: list[dict[str, Any]], effective_cwd: str) -> None:
+    """
+    Tras fusionar la lista de gateways: avisa si hay puerto o DuckDB duplicados.
+    (errno 48 en bind, o lock DuckDB al compartir fichero entre procesos).
+    """
+    by_port, by_db = _compute_gateway_cluster_maps(apps, effective_cwd)
+    for port, names in sorted(by_port.items()):
+        if len(names) > 1:
+            print(
+                f"[red]⚠️  Puerto {port} repetido en: {', '.join(names)}. "
+                "Solo uno puede escuchar; el resto falla con [Errno 48] address already in use. "
+                "Configura un puerto distinto por gateway (p. ej. 8000, 8080, 8001) y `pm2 restart <nombre> --update-env`.[/]",
+                flush=True,
+            )
+    for db_key, names in by_db.items():
+        if len(names) > 1:
+            print(
+                f"[red]⚠️  Misma DuckDB compartida por: {', '.join(names)}[/]\n"
+                f"    Archivo: {db_key}\n"
+                "    DuckDB solo permite un proceso con escritura en ese fichero; verás locks o errores de concurrencia. "
+                "Solución: un .duckdb por servicio, o deja un solo proceso usando esa BD (cierra el otro con `pm2 stop`).",
+                flush=True,
+            )
+
+
+def _render_gateway_ecosystem_cjs(
+    python_path: str,
+    effective_cwd: str,
+    apps: list[dict[str, Any]],
+) -> str:
+    """Genera ecosystem PM2 con varios gateways (mismo código, distinto nombre/puerto/env)."""
+    lines = [
+        "/**",
+        " * PM2 — API Gateways DuckClaw (fusionado). Varios procesos en un solo archivo.",
+        " * pm2 start config/ecosystem.api.config.cjs --only \"NombreGateway\"",
+        " */",
+        "module.exports = {",
+        "  apps: [",
+    ]
+    for app in apps:
+        if not isinstance(app, dict):
+            continue
+        name = (app.get("name") or "").strip()
+        if not name:
+            continue
+        host = (app.get("host") or "0.0.0.0").strip()
+        port = int(app.get("port") or 8000)
+        env = app.get("env") or {}
+        if not isinstance(env, dict):
+            env = {}
+        env = dict(env)
+        env.setdefault("DUCKCLAW_PM2_PROCESS_NAME", name)
+        env_str = json.dumps(env, indent=8, ensure_ascii=False)
+        args_cmd = (
+            f"-m uvicorn main:app --host {host} --port {port} --app-dir services/api-gateway"
+        )
+        lines.append("    {")
+        lines.append(f"      name: {json.dumps(name)},")
+        lines.append(f"      script: {json.dumps(python_path)},")
+        lines.append(f"      args: {json.dumps(args_cmd)},")
+        lines.append(f"      cwd: {json.dumps(effective_cwd)},")
+        lines.append("      interpreter: \"none\",")
+        lines.append("      autorestart: true,")
+        lines.append("      watch: false,")
+        lines.append("      max_restarts: 10,")
+        lines.append(f"      env: {env_str},")
+        lines.append("    },")
+    lines.append("  ],")
+    lines.append("};")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def pm2_delete_named_app(name: Optional[str]) -> bool:
+    """
+    Elimina un proceso PM2 por nombre si existe. Devuelve True si PM2 eliminó el proceso.
+    """
+    if not name or not str(name).strip():
+        return False
+    import shutil
+    import subprocess as sp
+
+    if shutil.which("pm2") is None:
+        return False
+    n = str(name).strip()
+    r = sp.run(["pm2", "delete", n], capture_output=True, text=True, timeout=30)
+    return r.returncode == 0
+
+
 def serve(
     host: str = "0.0.0.0",
     port: int = 8123,
@@ -259,11 +473,17 @@ def serve(
     name: Optional[str] = None,
     cwd: Optional[str] = None,
     gateway: bool = False,
+    delete_pm2_name: Optional[str] = None,
+    gateway_db_path: Optional[str] = None,
 ) -> int:
     """
     Start the DuckClaw API server.
     gateway=True: services/api-gateway/main.py (uvicorn --app-dir services/api-gateway).
     Default name: DuckClaw-Gateway con gateway=True, DuckClaw-API si no.
+    delete_pm2_name: opcional; elimina ese proceso PM2 antes de arrancar (sustitución explícita).
+    gateway_db_path: si se indica, fija DUCKCLAW_DB_PATH solo para este proceso en el ecosystem
+    (varios gateways pueden usar BDs distintas sin pisar el .env global).
+    Con gateway+pm2 se fusionan varios gateways en config/api_gateways_pm2.json y ecosystem.api.config.cjs.
     """
     effective_name = name if name is not None else ("DuckClaw-Gateway" if gateway else "DuckClaw-API")
     effective_cwd = str(Path(cwd or os.getcwd()).resolve())
@@ -271,7 +491,6 @@ def serve(
     if pm2:
         from duckclaw.ops.providers.pm2 import is_pm2_available
         import shutil
-        import json
         import subprocess as sp
 
         if not is_pm2_available():
@@ -289,6 +508,7 @@ def serve(
 
         python_path = _resolve_python()
         config_path = Path(effective_cwd) / "config" / "ecosystem.api.config.cjs"
+        graph_api_config_path = Path(effective_cwd) / "config" / "ecosystem.graph_api.config.cjs"
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
         env_vars: dict = {"PYTHONPATH": effective_cwd}
@@ -299,6 +519,7 @@ def serve(
             "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
             "DUCKCLAW_REDIS_URL", "DUCKCLAW_WRITE_QUEUE_URL",
             "REDIS_URL", "DUCKCLAW_TAILSCALE_AUTH_KEY",
+            "DUCKCLAW_SAVE_CONVERSATION_TRACES", "DUCKCLAW_CONVERSATION_TRACES_FORMAT",
         ):
             val = os.environ.get(key, "")
             if val:
@@ -306,15 +527,86 @@ def serve(
         if gateway and not env_vars.get("REDIS_URL") and env_vars.get("DUCKCLAW_REDIS_URL"):
             env_vars["REDIS_URL"] = env_vars["DUCKCLAW_REDIS_URL"]
 
+        gwp = (gateway_db_path or "").strip()
+        if gwp:
+            _dbf = Path(gwp)
+            if not _dbf.is_absolute():
+                _dbf = Path(effective_cwd) / _dbf
+            env_vars["DUCKCLAW_DB_PATH"] = str(_dbf.resolve())
+
         if gateway:
-            args_cmd = f"-m uvicorn main:app --host {host} --port {port} --app-dir services/api-gateway"
-        else:
-            args_cmd = f"-m uvicorn duckclaw.graphs.graph_server:app --host {host} --port {port}"
+            env_vars["DUCKCLAW_PM2_PROCESS_NAME"] = effective_name
+            # Varios API Gateways: fusionar en api_gateways_pm2.json + ecosystem (no borrar otros procesos).
+            gw_port = int(port)
+            apps = _load_merged_gateway_apps(effective_cwd)
+            for a in apps:
+                if not isinstance(a, dict):
+                    continue
+                other = (a.get("name") or "").strip()
+                if other and other != effective_name and int(a.get("port") or 0) == gw_port:
+                    print(
+                        f"[yellow]⚠️  Otro gateway ({other}) ya usa el puerto {gw_port}. "
+                        f"Cada instancia necesita un puerto distinto.[/]",
+                        flush=True,
+                    )
+                    break
+            apps = _upsert_gateway_app(
+                apps,
+                name=effective_name,
+                host=host,
+                port=gw_port,
+                env_vars=dict(env_vars),
+            )
+            save_gateway_cluster_config(effective_cwd, apps)
+
+            dn = (delete_pm2_name or "").strip()
+            if dn and dn != effective_name and pm2_delete_named_app(dn):
+                print(
+                    f"🗑️  PM2: proceso eliminado ({dn}) antes de arrancar '{effective_name}'.",
+                    flush=True,
+                )
+
+            _db_path = env_vars.get("DUCKCLAW_DB_PATH", "").strip()
+            if _db_path:
+                _db_file = Path(_db_path)
+                if not _db_file.is_absolute():
+                    _db_file = Path(effective_cwd) / _db_file
+                _db_file = _db_file.resolve()
+                _db_file.parent.mkdir(parents=True, exist_ok=True)
+                if not _db_file.exists():
+                    try:
+                        _sys_path = sys.path.copy()
+                        sys.path.insert(0, effective_cwd)
+                        from duckclaw import DuckClaw
+                        _db = DuckClaw(str(_db_file))
+                        _db.execute("SELECT 1")
+                        sys.path[:] = _sys_path
+                        print(f"✅  BD creada: {_db_file}", flush=True)
+                    except Exception as _e:
+                        print(f"⚠️  No se pudo crear la BD en {_db_file}: {_e}", flush=True)
+
+            existing = sp.run(["pm2", "id", effective_name], capture_output=True, text=True)
+            if existing.returncode == 0 and existing.stdout.strip() not in ("", "[]"):
+                sp.run(["pm2", "restart", effective_name, "--update-env"], check=False)
+                print(f"🔄  PM2: {effective_name} reiniciado.", flush=True)
+            else:
+                sp.run(
+                    ["pm2", "start", str(config_path), "--only", effective_name],
+                    check=False,
+                )
+                print(f"🚀  PM2: {effective_name} iniciado (solo este proceso).", flush=True)
+
+            print(f"\n   API →  http://localhost:{gw_port}", flush=True)
+            print(f"   Docs → http://localhost:{gw_port}/docs", flush=True)
+            print(f"   Logs → pm2 logs {effective_name}", flush=True)
+            return 0
+
+        args_cmd = f"-m uvicorn duckclaw.graphs.graph_server:app --host {host} --port {port}"
 
         env_str = json.dumps(env_vars, indent=8)
         config_content = f"""/**
- * PM2 config for DuckClaw API server (generated by duckops serve --pm2).
- * Start:  pm2 start config/ecosystem.api.config.cjs
+ * PM2 — LangGraph HTTP (sin --gateway). No mezclar con ecosystem.api.config.cjs (API Gateways).
+ * Start:  pm2 start config/ecosystem.graph_api.config.cjs
  */
 module.exports = {{
   apps: [
@@ -332,8 +624,15 @@ module.exports = {{
   ],
 }};
 """
-        config_path.write_text(config_content, encoding="utf-8")
-        print(f"✅  config/ecosystem.api.config.cjs generado: {config_path}", flush=True)
+        graph_api_config_path.write_text(config_content, encoding="utf-8")
+        print(f"✅  config/ecosystem.graph_api.config.cjs generado: {graph_api_config_path}", flush=True)
+
+        dn = (delete_pm2_name or "").strip()
+        if dn and dn != effective_name and pm2_delete_named_app(dn):
+            print(
+                f"🗑️  PM2: proceso anterior eliminado ({dn}) → ahora '{effective_name}'.",
+                flush=True,
+            )
 
         _db_path = env_vars.get("DUCKCLAW_DB_PATH", "").strip()
         if _db_path:
@@ -359,7 +658,7 @@ module.exports = {{
             sp.run(["pm2", "restart", effective_name, "--update-env"], check=False)
             print(f"🔄  PM2: {effective_name} reiniciado.", flush=True)
         else:
-            sp.run(["pm2", "start", str(config_path)], check=False)
+            sp.run(["pm2", "start", str(graph_api_config_path)], check=False)
             print(f"🚀  PM2: {effective_name} iniciado.", flush=True)
 
         print(f"\n   API →  http://localhost:{port}", flush=True)

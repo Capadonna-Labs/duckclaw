@@ -7,7 +7,9 @@ Spec: specs/features/Observabilidad 2.0 (Logging Estructurado y Métricas).md
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
+import os
 import sys
 import time
 from contextlib import contextmanager
@@ -23,6 +25,46 @@ ctx_chat: ContextVar[str] = ContextVar("chat_id", default="unknown")
 _DEFAULT_TENANT = "default"
 _DEFAULT_WORKER = "manager"
 _DEFAULT_CHAT = "unknown"
+
+# ANSI: mismo esquema que el API Gateway (`services/api-gateway/main.py`) para chat_id reconocible en PM2.
+_ANSI_RESET = "\033[0m"
+_CHAT_ID_COLORS = (
+    "\033[38;5;39m",  # blue
+    "\033[38;5;45m",  # cyan
+    "\033[38;5;82m",  # green
+    "\033[38;5;190m",  # yellow
+    "\033[38;5;208m",  # orange
+    "\033[38;5;201m",  # magenta
+    "\033[38;5;135m",  # purple
+    "\033[38;5;51m",  # aqua
+)
+
+
+def _terminal_chat_id_colors_enabled() -> bool:
+    if os.environ.get("NO_COLOR", "").strip():
+        return False
+    if os.environ.get("DUCKCLAW_LOG_NO_COLOR", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    return True
+
+
+def chat_id_color_code(chat_id: str) -> str:
+    """Código ANSI de primer plano estable por chat_id (hash SHA1)."""
+    cid = (chat_id or "default").encode("utf-8", errors="ignore")
+    idx = int(hashlib.sha1(cid).hexdigest(), 16) % len(_CHAT_ID_COLORS)
+    return _CHAT_ID_COLORS[idx]
+
+
+def format_chat_id_for_terminal(chat_id: str, *, as_repr: bool = False) -> str:
+    """
+    chat_id con color para logs en terminal (PM2). Desactivar con NO_COLOR o DUCKCLAW_LOG_NO_COLOR=1.
+    ``as_repr=True`` emula ``repr()`` del valor (como en ``out(chat_id=...)``).
+    """
+    raw = chat_id if chat_id is not None else "default"
+    display = repr(raw) if as_repr else str(raw)
+    if not _terminal_chat_id_colors_enabled():
+        return display
+    return f"{chat_id_color_code(str(raw))}{display}{_ANSI_RESET}"
 
 def set_log_context(
     *,
@@ -87,7 +129,7 @@ class DuckClawStructuredFormatter(logging.Formatter):
 
     def __init__(self) -> None:
         super().__init__(
-            fmt="%(asctime)s | [%(tenant)s:%(worker)s] | %(chat_id)s | %(message)s",
+            fmt="%(asctime)s | [%(tenant)s:%(worker)s] | %(chat_id_colored)s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
 
@@ -98,6 +140,8 @@ class DuckClawStructuredFormatter(logging.Formatter):
             record.worker = ctx_worker.get()
         if not hasattr(record, "chat_id"):
             record.chat_id = ctx_chat.get()
+        cid = str(getattr(record, "chat_id", None) or ctx_chat.get() or "unknown")
+        setattr(record, "chat_id_colored", format_chat_id_for_terminal(cid, as_repr=False))
         return super().format(record)
 
 
@@ -111,6 +155,7 @@ DEFAULT_STRUCTURED_LOGGERS: tuple[str, ...] = (
     "duckclaw.graphs.graph_server",
     "duckclaw.workers",
     "duckclaw.workers.factory",
+    "duckclaw.fly",
     "duckclaw.forge",
     "duckclaw.forge.skills.ibkr_bridge",
     "duckclaw.bi.agent",
@@ -152,8 +197,17 @@ def get_obs_logger(name: str = "duckclaw.obs") -> logging.Logger:
     return logging.getLogger(name)
 
 
-def log_req(logger: logging.Logger, msg: str, *args: Any) -> None:
-    logger.info("[REQ] " + msg, *args)
+def log_req(logger: logging.Logger, msg: str, *args: Any, source: Optional[str] = None) -> None:
+    """Log [REQ]. Si ``source`` (p. ej. ``body``), añade `` (via body)`` al final."""
+    if source:
+        logger.info("[REQ] " + msg + " (via %s)", *args, source)
+    else:
+        logger.info("[REQ] " + msg, *args)
+
+
+def log_fly(logger: logging.Logger, msg: str, *args: Any) -> None:
+    """Log on-the-fly / gateway commands con prefijo [FLY]."""
+    logger.info("[FLY] " + msg, *args)
 
 
 def log_plan(logger: logging.Logger, msg: str, *args: Any) -> None:

@@ -1,0 +1,22 @@
+# TheMindCrupier — Motor de juego para The Mind
+# Topología: general (usa general_graph con tools específicas de juego y send_dm).
+name: TheMindCrupier
+id: TheMindCrupier
+schema_name: TheMindCrupier
+topology: general
+read_only: false
+allowed_tables:
+  - the_mind_games
+  - the_mind_players
+llm:
+  required: true
+  temperature: 0.0
+skills:
+  # Usa send_dm para repartir cartas en privado y mensajes cortos de estado.
+  - send_dm
+  # broadcast_message para anuncios a todos los jugadores de la partida.
+  - broadcast_message
+  # deal_cards para repartir cartas según el nivel actual.
+  - deal_cards
+  - send_proactive_message
+

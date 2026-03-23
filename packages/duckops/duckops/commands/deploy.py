@@ -38,7 +38,7 @@ def cmd_deploy(
         from duckclaw.ops.manager import deploy as deploy_fn
     except ImportError as e:
         typer.echo(f"[red]No se pudo importar duckclaw.ops: {e}[/]", err=True)
-        typer.echo("Instala el monorepo: uv sync o pip install -e .")
+        typer.echo("Instala el monorepo: uv sync (o uv pip install -e . --no-build-isolation)")
         raise typer.Exit(1)
 
     typer.secho(f"Desplegando {name} con {provider}...", fg=typer.colors.CYAN)

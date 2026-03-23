@@ -56,6 +56,7 @@ def main():
         sys.exit(1)
 
     from duckclaw.forge import AgentAssembler, WORKERS_TEMPLATES_DIR
+    from duckclaw.utils.langsmith_trace import get_tracing_config
 
     yaml_path = WORKERS_TEMPLATES_DIR / WORKER_ID / "manifest.yaml"
     graph = AgentAssembler.from_yaml(yaml_path).build(
@@ -84,8 +85,15 @@ def main():
 
     @app.post("/invoke")
     def invoke(body: InvokeBody):
-        state = {"incoming": body.message, "history": body.history or []}
-        result = graph.invoke(state)
+        state = {
+            "input": body.message,
+            "incoming": body.message,
+            "history": body.history or [],
+        }
+        tenant = (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip() or "default"
+        thread = (body.thread_id or "").strip() or "unknown"
+        trace_cfg = get_tracing_config(tenant, WORKER_ID, thread)
+        result = graph.invoke(state, trace_cfg)
         reply = result.get("reply") or ""
         return {"reply": reply, "worker_id": WORKER_ID, "instance": INSTANCE}
 

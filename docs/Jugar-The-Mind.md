@@ -1,102 +1,113 @@
 # Cómo jugar The Mind con DuckClaw
 
-Guía para jugar **The Mind** en un grupo de Telegram usando el crupier virtual **TheMindCrupier** de DuckClaw.
+Guía para jugar **The Mind** usando el crupier virtual **TheMindCrupier** y los **fly commands** del API Gateway (estado en la bóveda DuckDB activa de cada usuario).
 
 ---
 
 ## 1. Qué es The Mind
 
-The Mind es un juego de cartas cooperativo. Los jugadores tienen cartas numeradas (1–100) y deben jugarlas **en orden ascendente** sin poder hablar de los números. Si alguien juega una carta y otro tenía una menor sin jugarla, pierden una vida. El objetivo es superar todos los niveles sin quedarse sin vidas.
+The Mind es un juego de cartas cooperativo. Los jugadores tienen cartas numeradas (1–100) y deben jugarlas **en orden ascendente** sin poder hablar de los números. Si alguien juega una carta y otro tenía una menor sin jugarla, pierden una vida. El objetivo es superar los niveles sin quedarse sin vidas.
 
 ---
 
-## 2. Configuración en el grupo
+## 2. Configuración
 
 1. **Añadir el crupier al equipo del chat**  
-   En el grupo donde quieres jugar, escribe:
    ```
    /workers --add TheMindCrupier
    ```
    (También vale `themindcrupier` en minúsculas.)
 
-2. **Comprobar**  
-   Con `/workers` verás que TheMindCrupier está en el equipo. Con `/roles` puedes ver que el template está disponible.
+2. **Plantilla de referencia**  
+   Copia en repo: [`templates/workers/the_mind_crupier/`](../templates/workers/the_mind_crupier/README.md) (canónico en `packages/agents/.../TheMindCrupier/`).
 
 3. **Requisitos**  
-   - El bot debe poder enviar **mensajes directos (DM)** a cada jugador para repartir las cartas en secreto.  
-   - El webhook de n8n (o el canal que use el gateway) debe estar configurado para enviar `chat_id`, `user_id` y `username` en cada mensaje, así el crupier sabe quién juega y puede enviar DMs.
+   - Webhook n8n (u otro bridge) para enviar **DM** con `chat_id` + `text` (ver abajo).  
+   - Cada jugador debe hacer **`/join`** desde el **DM** del bot para que su `chat_id` privado quede en `the_mind_players`.
+
+### Equipo `/team` y mensajes
+
+- Si el tenant tiene usuarios en **`/team`**, solo esos `user_id` pueden **crear** partidas (`/new_mind`), **unirse** (`/join`) e **iniciar** (`/start_mind`). Si la lista está vacía, no se aplica esta restricción (compatibilidad).
+- **Cartas:** cada jugador recibe un **mensaje distinto** por DM (mano propia).
+- **Avisos del juego** (nivel, errores, victoria): el **mismo texto** se envía en paralelo al **DM de cada jugador** de la partida (no hay chat grupal obligatorio en el motor).
+- Tras **`/new_mind`**, el bot añade un recordatorio con el listado actual de `/team` y los pasos para invitar e iniciar.
 
 ---
 
-## 3. Comandos del juego
+## 3. Variables de entorno (outbound / n8n)
 
-El flujo nuevo separa la **creación de la partida** (con `game_id`) del chat concreto donde escribes.
+El motor usa **la primera URL definida** entre (en orden):
 
-| Comando | Dónde | Descripción |
-|--------|-------|-------------|
-| **/start_mind** | Cualquier chat | Inicializa el esquema de tablas de The Mind en DuckDB (una sola vez). |
-| **/new_game the_mind** | Chat del creador (DM o grupo) | Crea una partida nueva de The Mind y devuelve un `game_id` (ej. `game_1234_aaaa`). |
-| **/join \<game_id\>** | DM de cada jugador | El jugador se apunta a esa partida; el bot asocia su `chat_id` de DM al `game_id`. |
-| **/start_game \[game_id\]** | Chat del creador | Pone la partida en estado `playing` y deja listo el nivel 1. Si no indicas `game_id`, toma la última partida en `waiting`. |
-| **/play \<número\>** | DM de cada jugador | Registra que juegas esa carta en tu partida activa. Ejemplo: `/play 15`. El motor comprueba que tengas la carta, que nadie tuviera una menor, y actualiza vidas y estado. |
+| Variable | Uso |
+|----------|-----|
+| `DUCKCLAW_TELEGRAM_SEND_WEBHOOK_URL` | Webhook preferido para Telegram |
+| `DUCKCLAW_SEND_DM_WEBHOOK_URL` | Alternativa DM |
+| `N8N_OUTBOUND_WEBHOOK_URL` | Webhook genérico n8n (mismo contrato) |
 
----
+**Payload JSON:** `{"chat_id": "<id>", "text": "<mensaje>"}`
 
-## 4. Flujo de una partida
-
-1. **Inicializar esquema (una vez)**  
-   Escribe `/start_mind` en cualquier chat donde tengas al bot. Si ya existe el esquema, no pasa nada.
-
-2. **Crear la partida**  
-   El jugador que actuará como organizador escribe en su chat (DM o grupo):  
-   `/new_game the_mind`  
-   El bot responde con un `game_id`, por ejemplo: `game_1731000000_abcd`.
-
-3. **Unirse a la partida**  
-   Cada jugador abre un **DM** con el bot y escribe:  
-   `/join game_1731000000_abcd`  
-   Así el motor asocia su `chat_id` privado a esa partida.
-
-4. **Empezar a jugar**  
-   El organizador escribe:  
-   `/start_game game_1731000000_abcd`  
-   (o simplemente `/start_game` si solo hay una partida en `waiting`).
-
-5. **Repartir cartas (vía herramienta `deal_cards`)**  
-   El crupier (LLM) usará la herramienta `deal_cards(game_id, level)` para repartir cartas por DM cuando toque empezar un nivel. Cada jugador recibirá un mensaje tipo:  
-   `Tus cartas para el Nivel 1 son: [12, 45, 78]`.
-
-6. **Jugar cartas**  
-   Los jugadores, **sin decir sus números en voz alta**, van enviando desde su DM:  
-   - `/play 12`  
-   - `/play 45`  
-   - …  
-   El motor valida cada jugada y actualiza las tablas (`the_mind_games` y `the_mind_players`).
-
-7. **Mensajes a todos (broadcast)**  
-   El crupier usará la herramienta `broadcast_message(game_id, message)` para avisar a todos los jugadores a la vez (por ejemplo: *\"✅ @Jugador2 jugó el 12\"*, *\"❌ Error, pierden una vida\"*, *\"Nivel superado\"*).
+**Autenticación opcional:** `N8N_AUTH_KEY` se envía en la cabecera `X-N8N-Auth` (también compatible con flujos que esperan el mismo secreto).
 
 ---
 
-## 5. Reglas que aplica el motor
+## 4. Comandos del juego (fly — sin LLM)
 
-- **Orden:** Solo se puede jugar una carta si nadie tiene una carta con número menor sin jugar. Si alguien juega (por ejemplo) el 15 y otro jugador tenía una carta &lt; 15, **pierden una vida** y se eliminan esas cartas menores de todas las manos.
-- **Cartas en secreto:** Las cartas se reciben solo por DM. No se deben escribir los números en el chat del grupo (solo el comando `/play <numero>` cuando toca jugar).
-- **Vidas y shurikens:** El número de vidas y el uso de shurikens lo gestiona el motor según el nivel (ver especificación del juego en el repo).
+El estado vive en DuckDB (`the_mind_games`, `the_mind_players`) en la **bóveda activa** del usuario que invoca el comando.
+
+| Comando | Descripción |
+|---------|-------------|
+| **`/new_mind`** | Crea partida (alias de `/new_game the_mind`). El creador queda registrado como jugador. |
+| **`/new_game the_mind`** | Igual que arriba. |
+| **`/join <game_id>`** | Unirse desde el DM del bot. |
+| **`/start_mind [game_id]`** | Pone la partida en `playing`, reparte **Nivel 1** (1 carta por jugador), envía cartas por DM y anuncia el inicio a todos. |
+| **`/play <n>`** | Jugar carta `n` (1–100). Validación atómica; error = −1 vida y limpieza de cartas menores. |
+| **`/deal [game_id]`** | Reparte de nuevo según `current_level` (p. ej. tras subir de nivel). |
+| **`/start_game [game_id]`** | Solo pasa a `playing` sin repartir (compatibilidad). |
+
+El esquema de tablas se crea con **`_ensure_the_mind_schema`** al crear/unirse/jugar; no hace falta un comando solo para DDL.
 
 ---
 
-## 6. Resumen rápido
+## 5. Flujo recomendado (2 jugadores)
 
-```
-/workers --add TheMindCrupier    → Añadir crupier al equipo
-/start_mind                       → Inicializar esquema de The Mind
-/new_game the_mind                → Crear partida y obtener game_id
-/join <game_id>                   → Unirse a la partida desde tu DM
-/start_game [game_id]             → Poner la partida a jugar
-/play 15                          → Jugar la carta 15 (en tu DM)
+1. Ambos usuarios deben estar en **`/team`** del tenant (Telegram Guard).
+2. **Usuario A:** `/new_mind` → copia el `game_id`.
+3. **Usuario B:** en su DM con el bot, `/join <game_id>`.
+4. **Usuario A (u organizador):** `/start_mind` o `/start_mind <game_id>`.
+5. Cada uno recibe sus cartas por **DM** (webhook). Mensaje público de progreso vía broadcast a todos los `chat_id` de la partida.
+6. Por turnos, en DM: `/play <n>` hasta vaciar el nivel. El motor avanza de nivel o marca victoria al completar el nivel 12.
+
+---
+
+## 6. Verificación en DuckDB (bóveda del usuario)
+
+Sustituye la ruta por la de tu bóveda activa (`db/private/<user_id>/...finanzdb1.duckdb` o la que muestre `/vault`):
+
+```sql
+SELECT * FROM the_mind_games WHERE game_id = 'game_...';
+SELECT game_id, chat_id, username, cards, is_ready FROM the_mind_players WHERE game_id = 'game_...';
 ```
 
-Para más detalle técnico (tablas DuckDB, fly commands, skills `send_dm`, `broadcast_message`, `deal_cards`), ver las specs:  
-`specs/features/Multi-Threading, Gestión de Grupos y Motor de Juegos (The Mind).md` y  
-`specs/features/Multi-Channel Broadcasting (The Mind Engine).md`.
+Tras Nivel 1 con 2 jugadores y jugadas correctas: manos vacías, `cards_played` con las cartas en orden, y mensaje de paso a Nivel 2 (o victoria si estabas en nivel 12).
+
+---
+
+## 7. Reglas que aplica el motor
+
+- **Orden:** Si alguien juega `num` y otro jugador tenía una carta `&lt; num`, pierden 1 vida y se eliminan de **todas** las manos las cartas `&lt; num`.
+- **Cartas en secreto:** Solo por DM; el broadcast no revela manos.
+- **Niveles:** Tras vaciar todas las manos, se limpia `cards_played` y se reparte el siguiente nivel (`current_level` cartas por jugador). Tras completar el nivel 12, estado `won`.
+
+---
+
+## 8. Resumen rápido
+
+```
+/workers --add TheMindCrupier
+/new_mind
+/join <game_id>          # cada jugador, por DM
+/start_mind [game_id]
+/play 15                  # en tu DM
+```
+
+Specs adicionales: `specs/features/Motor de Juego The Mind (Multi-Channel).md`, `Multi-Channel Broadcasting (The Mind Engine).md`.

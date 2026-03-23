@@ -9,7 +9,6 @@ Endpoints: /api/v1/agent/chat, /api/v1/db/write, homeostasis, system health.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -53,6 +52,64 @@ for _base in (_repo_root, Path.cwd()):
                     os.environ.setdefault(_k.strip(), _v.strip().strip("'\""))
         break
 
+
+def _apply_db_path_from_api_gateways_pm2() -> None:
+    """
+    Varias apps PM2 comparten el mismo .env; `setdefault` puede dejar DUCKCLAW_DB_PATH
+    apuntando a finanzdb para todos. Forzar la ruta del bloque correcto en
+    config/api_gateways_pm2.json según DUCKCLAW_PM2_PROCESS_NAME (PM2) o --port (uvicorn).
+    """
+    cfg = _repo_root / "config" / "api_gateways_pm2.json"
+    if not cfg.is_file():
+        return
+    try:
+        raw = json.loads(cfg.read_text(encoding="utf-8"))
+        apps = raw.get("apps") if isinstance(raw, dict) else None
+        if not isinstance(apps, list):
+            return
+    except Exception:
+        return
+
+    proc_name = (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip()
+    chosen: dict | None = None
+    if proc_name:
+        for a in apps:
+            if isinstance(a, dict) and (a.get("name") or "").strip() == proc_name:
+                chosen = a
+                break
+    if chosen is None:
+        port: int | None = None
+        try:
+            argv = sys.argv
+            for i, x in enumerate(argv):
+                if x == "--port" and i + 1 < len(argv):
+                    port = int(argv[i + 1])
+                    break
+        except (ValueError, IndexError):
+            port = None
+        if port is not None:
+            matches = [
+                a for a in apps
+                if isinstance(a, dict) and int(a.get("port") or 0) == port
+            ]
+            if len(matches) == 1:
+                chosen = matches[0]
+    if chosen is None:
+        return
+    env = chosen.get("env") if isinstance(chosen.get("env"), dict) else {}
+    dbp = (env.get("DUCKCLAW_DB_PATH") or "").strip()
+    if not dbp:
+        return
+    pth = Path(dbp)
+    if not pth.is_absolute():
+        pth = (_repo_root / pth).resolve()
+    else:
+        pth = pth.resolve()
+    os.environ["DUCKCLAW_DB_PATH"] = str(pth)
+
+
+_apply_db_path_from_api_gateways_pm2()
+
 try:
     from core.config import settings
 except ImportError:
@@ -65,6 +122,7 @@ except ImportError:
 # Logs estructurados (Observabilidad 2.0)
 from duckclaw.utils.logger import (
     configure_structured_logging,
+    format_chat_id_for_terminal,
     get_obs_logger,
     log_err,
     log_req,
@@ -90,37 +148,6 @@ CREATE TABLE IF NOT EXISTS main.authorized_users (
 );
 """
 
-# ANSI colors (foreground). Kept readable on dark terminals.
-_CHAT_COLORS = (
-    "\033[38;5;39m",   # blue
-    "\033[38;5;45m",   # cyan
-    "\033[38;5;82m",   # green
-    "\033[38;5;190m",  # yellow
-    "\033[38;5;208m",  # orange
-    "\033[38;5;201m",  # magenta
-    "\033[38;5;135m",  # purple
-    "\033[38;5;51m",   # aqua
-)
-_ANSI_RESET = "\033[0m"
-
-
-def _chat_color(chat_id: str) -> str:
-    cid = (chat_id or "default").encode("utf-8", errors="ignore")
-    idx = int(hashlib.sha1(cid).hexdigest(), 16) % len(_CHAT_COLORS)
-    return _CHAT_COLORS[idx]
-
-
-def _c_chat(chat_id: str, text: str) -> str:
-    """Colorize text by chat_id for PM2/terminal readability."""
-    return f"{_chat_color(chat_id)}{text}{_ANSI_RESET}"
-
-
-def _c_chat_id(chat_id: str) -> str:
-    """Colorize only chat_id value."""
-    cid = repr(chat_id)
-    return f"{_chat_color(chat_id)}{cid}{_ANSI_RESET}"
-
-
 def _normalize_local_artifacts_to_db() -> None:
     """Mueve artefactos locales conocidos a `db/` si aparecen en la raíz."""
     try:
@@ -144,13 +171,20 @@ def _normalize_local_artifacts_to_db() -> None:
 
 def _langsmith_auth_log(*, auth_status: str, user_id: str, tenant_id: str) -> None:
     """
-    Best-effort audit a LangSmith para Telegram Guard.
+    Opcional: un run por request en LangSmith (Telegram Guard) satura el dashboard.
 
-    Tags (según spec):
-      - `auth_status: authorized`
-      - `auth_status: unauthorized_attempt`
+    Por defecto **no** se envía nada a LangSmith. Activar solo si hace falta depuración:
+    ``DUCKCLAW_LANGSMITH_LOG_TELEGRAM_GUARD=true``
+
+    La auditoría de seguridad sigue en logs estructurados del gateway (PM2) cuando corresponda.
     """
     try:
+        if os.environ.get("DUCKCLAW_LANGSMITH_LOG_TELEGRAM_GUARD", "").strip().lower() not in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
         api_key = os.environ.get("LANGCHAIN_API_KEY") or os.environ.get("LANGSMITH_API_KEY")
         if not api_key:
             return
@@ -159,14 +193,18 @@ def _langsmith_auth_log(*, auth_status: str, user_id: str, tenant_id: str) -> No
 
         from langsmith import Client  # noqa: PLC0415
 
+        from duckclaw.utils.langsmith_trace import create_completed_langsmith_run
+
         client = Client(api_key=api_key)
         tag = f"auth_status: {auth_status}"
-        client.create_run(
-            name="telegram_guard_auth",
+        env_tag = os.getenv("DUCKCLAW_ENV", "dev")
+        create_completed_langsmith_run(
+            client,
+            name="TelegramGuard",
             run_type="chain",
             inputs={"user_id": str(user_id), "tenant_id": str(tenant_id)},
             outputs={"auth_status": auth_status},
-            tags=[tag, "telegram_guard"],
+            tags=[tag, "telegram_guard", f"env:{env_tag}", f"tenant:{tenant_id}"],
         )
     except Exception:
         # Auditoría best-effort: nunca rompas el flujo de seguridad.
@@ -526,8 +564,8 @@ async def _authorize_or_reject(*, tenant_id: str, user_id: str, is_owner: bool) 
 
     # PM2 visibility: ruido en logs, pero respuesta silenciosa en Telegram (n8n no debería reenviar un texto).
     _gateway_log.warning(
-        "[SECURITY_ALERT] Unauthorized access attempt: user_id='%s' tenant_id='%s'",
-        user_id,
+        "[SECURITY_ALERT] Unauthorized access attempt: user_id=%s tenant_id='%s'",
+        format_chat_id_for_terminal(str(user_id or "unknown")),
         tenant_id,
     )
     _langsmith_auth_log(auth_status="unauthorized_attempt", user_id=user_id, tenant_id=tenant_id)
@@ -574,12 +612,16 @@ async def agent_chat(
         _gateway_log.warning(
             "[session] chat_id/session_id ausente; usando 'default' (source=%s). "
             "El estado por chat (/sandbox) no coincidirá con otros mensajes. "
-            "Añade chat_id al body, ?chat_id= en la URL, o cabecera X-Chat-Id.",
+            "Añade chat_id al body, ?chat_id= en la URL, o cabecera X-Chat-Id. "
+            "| chat=%s",
             session_source,
+            format_chat_id_for_terminal(session_id),
         )
     else:
         _gateway_log.info(
-            f"[session] chat_id resolved: {_c_chat_id(session_id)} (source={session_source})"
+            "[session] chat_id resolved: %s (source=%s)",
+            format_chat_id_for_terminal(session_id),
+            session_source,
         )
     tenant_id = (body.tenant_id or "default").strip() or "default"
     return await _invoke_chat(body, worker_id or "finanz", session_id=session_id, tenant_id=tenant_id)
@@ -630,13 +672,23 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     chat_type = (payload.chat_type or "private").strip().lower() or "private"
     username = (payload.username or "Usuario").strip() or "Usuario"
     user_id = (payload.user_id or "").strip()
+    # Telegram DM: n8n a veces manda solo chat_id; para el Guard, user_id == chat_id.
+    if not user_id and chat_type == "private":
+        user_id = (session_id or "").strip()
     vault_user_id = user_id or session_id
     _, vault_db_path = resolve_active_vault(vault_user_id)
+    # TheMind-Gateway: BD dedicada en PM2 (the_mind.duckdb). El registry multi-bóveda
+    # sigue apuntando a finanzdb1 para el mismo chat_id → lock si se usa aquí.
+    if (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() == "TheMind-Gateway":
+        gw_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
+        if gw_db:
+            vault_db_path = str(Path(gw_db).expanduser().resolve())
     history = payload.history or []
     is_system_prompt = bool(payload.is_system_prompt or False)
 
-    set_log_context(tenant_id=tenant_id, worker_id=worker_id, chat_id=session_id)
-    log_req(_obs_log, _truncate_log(message))
+    # Observabilidad 2.1: fase orquestación HTTP → worker lógico "manager" (no el worker_id de ruta).
+    set_log_context(tenant_id=tenant_id, worker_id="manager", chat_id=session_id)
+    log_req(_obs_log, "%s", _truncate_log(message), source="body")
 
     # Telegram Guard: autoriza antes de ejecutar comandos (/team, /sandbox, etc.)
     # y antes de invocar cualquier lógica LangGraph.
@@ -660,19 +712,35 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         }
     if msg_stripped.startswith("/"):
         try:
+            from duckclaw import DuckClaw
             from duckclaw.graphs.on_the_fly_commands import handle_command
-            from duckclaw.graphs.graph_server import get_db
-            db = get_db()
-            cmd_reply = handle_command(
-                db,
-                session_id,
-                message,
-                requester_id=user_id,
-                tenant_id=tenant_id,
-                vault_user_id=vault_user_id,
-            )
+
+            vpath = (vault_db_path or "").strip()
+            Path(vpath).parent.mkdir(parents=True, exist_ok=True)
+            fly_db = DuckClaw(vpath)
+            try:
+                cmd_reply = handle_command(
+                    fly_db,
+                    session_id,
+                    message,
+                    requester_id=user_id,
+                    tenant_id=tenant_id,
+                    vault_user_id=vault_user_id,
+                )
+            finally:
+                _con = getattr(fly_db, "_con", None)
+                if _con is not None:
+                    try:
+                        _con.close()
+                    except Exception:
+                        pass
             if cmd_reply is not None:
-                _gateway_log.info("fly: %s", _truncate_log(cmd_reply))
+                if _gateway_log.isEnabledFor(logging.DEBUG):
+                    _gateway_log.debug(
+                        "fly (backup) chat=%s: %s",
+                        format_chat_id_for_terminal(session_id),
+                        _truncate_log(cmd_reply),
+                    )
                 return {
                     "response": cmd_reply,
                     "session_id": session_id,
@@ -680,12 +748,17 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
                     "elapsed_ms": 0,
                 }
         except Exception as exc:
-            _gateway_log.error("fly command failed: %s", exc)
+            _gateway_log.error("fly command failed chat=%s: %s", format_chat_id_for_terminal(session_id), exc)
 
     try:
         from duckclaw.graphs.graph_server import _get_or_build_graph, _ainvoke
     except Exception as exc:
-        _gateway_log.error("graph init failed: %s\n%s", exc, traceback.format_exc())
+        _gateway_log.error(
+            "graph init failed chat=%s: %s\n%s",
+            format_chat_id_for_terminal(session_id),
+            exc,
+            traceback.format_exc(),
+        )
         raise HTTPException(status_code=503, detail=f"Error inicializando el grafo: {exc}")
 
     # Concurrencia: procesar un solo mensaje por chat_id a la vez.
@@ -693,7 +766,12 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         try:
             graph = _get_or_build_graph()
         except Exception as exc:
-            _gateway_log.error("graph init failed: %s\n%s", exc, traceback.format_exc())
+            _gateway_log.error(
+                "graph init failed chat=%s: %s\n%s",
+                format_chat_id_for_terminal(session_id),
+                exc,
+                traceback.format_exc(),
+            )
             raise HTTPException(status_code=503, detail=f"Error inicializando el grafo: {exc}")
 
         try:
@@ -744,7 +822,12 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
             except Exception:
                 pass
             log_err(_obs_log, "agent_chat failed: %s", exc)
-            _gateway_log.error("agent_chat failed: %s\n%s", exc, traceback.format_exc())
+            _gateway_log.error(
+                "agent_chat failed chat=%s: %s\n%s",
+                format_chat_id_for_terminal(session_id),
+                exc,
+                traceback.format_exc(),
+            )
             raise HTTPException(status_code=500, detail=str(exc))
 
         try:
@@ -771,7 +854,11 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         elapsed_ms / 1000.0,
         tok_extra,
     )
-    _gateway_log.info(f"out(chat_id={_c_chat_id(session_id)}): {_truncate_log(reply_text)}")
+    _gateway_log.info(
+        "out(chat_id=%s): %s",
+        format_chat_id_for_terminal(session_id, as_repr=True),
+        _truncate_log(reply_text),
+    )
     reply_text = _strip_markdown_bold(reply_text or "")
     # Filtro UX: eliminar menús residuales del LLM antes de devolver al cliente
     reply_text = clean_agent_response(reply_text or "")
@@ -847,7 +934,14 @@ async def enqueue_write(req: WriteRequest):
             detail="db_path inválido para el usuario.",
         )
     if not db_path:
-        _, db_path = resolve_active_vault(user_id)
+        if (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() == "TheMind-Gateway":
+            gw_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
+            if gw_db:
+                db_path = str(Path(gw_db).expanduser().resolve())
+            else:
+                _, db_path = resolve_active_vault(user_id)
+        else:
+            _, db_path = resolve_active_vault(user_id)
     payload = {
         "task_id": task_id,
         "tenant_id": req.tenant_id,

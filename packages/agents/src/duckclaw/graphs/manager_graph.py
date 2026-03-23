@@ -15,7 +15,10 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from langchain_core.runnables import RunnableConfig
+
 from duckclaw.forge.atoms.state import ManagerAgentState
+from duckclaw.utils.langsmith_trace import get_tracing_config
 from duckclaw.utils.logger import get_obs_logger, log_plan, log_sys, set_log_context
 
 _log = logging.getLogger(__name__)
@@ -162,6 +165,8 @@ def build_manager_graph(
         # Preservar estado para nodos siguientes (por si el grafo hace merge sustituyendo)
         if "incoming" in state:
             out["incoming"] = state["incoming"]
+        if "input" in state:
+            out["input"] = state["input"]
         if "history" in state:
             out["history"] = state["history"]
         if "chat_id" in state:
@@ -176,6 +181,9 @@ def build_manager_graph(
 
     def plan_node(state: ManagerAgentState) -> ManagerAgentState:
         """Formula un plan / tarea clara, genera plan_title/tasks y opcionalmente asigna finanz para intenciones DB/tablas."""
+        _tid = (state.get("tenant_id") or "default").strip() or "default"
+        _cid = (state.get("chat_id") or "").strip() or "unknown"
+        set_log_context(tenant_id=_tid, worker_id="manager", chat_id=_cid)
         # Preservar incoming por si el estado no lo propaga (fallback: input, message)
         incoming = (state.get("incoming") or state.get("input") or state.get("message") or "").strip()
         available_plan = state.get("available_templates") or list_workers(troot)
@@ -212,6 +220,7 @@ def build_manager_graph(
         out["available_templates"] = available_plan
         # Preservar estado para invoke_worker
         out["incoming"] = incoming or state.get("incoming") or state.get("input") or state.get("message") or ""
+        out["input"] = out["incoming"]
         if "history" in state:
             out["history"] = state["history"]
         if "chat_id" in state:
@@ -241,15 +250,17 @@ def build_manager_graph(
             tasks_preview = ""
         if len(tasks_preview) > 160:
             tasks_preview = tasks_preview[:160] + "..."
+        _assigned_for_log = (out.get("assigned_worker_id") or assigned or "").strip() or "?"
         log_plan(
             _obs,
-            "[%s] | tasks: [%s]",
+            "[%s] -> tasks: [%s] | heur: [%s]",
             safe_title or "(vacío)",
+            _assigned_for_log,
             tasks_preview or "(sin tareas)",
         )
         return out
 
-    def invoke_worker_node(state: ManagerAgentState) -> ManagerAgentState:
+    def invoke_worker_node(state: ManagerAgentState, config: RunnableConfig) -> ManagerAgentState:
         """Invoca el grafo del worker asignado; set_busy/set_idle y append_task_audit. Solo invoca si el worker existe en templates."""
         chat_id = state.get("chat_id") or ""
         tenant_id = state.get("tenant_id") or "default"
@@ -293,6 +304,7 @@ def build_manager_graph(
                 )
             worker_graph = _worker_graph_cache[worker_cache_key]
             set_log_context(tenant_id=tenant_id, worker_id=assigned, chat_id=chat_id or "unknown")
+            log_sys(_obs, "Delegación: manager -> %s", assigned)
             raw_sb = get_chat_state(db, chat_id, "sandbox_enabled")
             sb_on = (raw_sb or "").strip().lower() in ("true", "1", "on", "sí", "si")
             db_display = vault_db_path or db_path or "(unknown)"
@@ -305,6 +317,7 @@ def build_manager_graph(
             # Pasar la tarea planificada al worker para que use herramientas y no responda genérico
             # Incluimos chat_id para que el worker pueda leer sandbox_enabled por sesión.
             worker_state = {
+                "input": planned_task,
                 "incoming": planned_task,
                 "history": history,
                 "chat_id": chat_id,
@@ -312,7 +325,13 @@ def build_manager_graph(
                 "user_id": user_id,
                 "vault_db_path": vault_db_path,
             }
-            result = worker_graph.invoke(worker_state)
+            trace_cfg = get_tracing_config(
+                tenant_id,
+                assigned,
+                str(chat_id or "unknown"),
+                base=config,
+            )
+            result = worker_graph.invoke(worker_state, trace_cfg)
             reply = str(result.get("reply") or result.get("output") or "Sin respuesta.")
             messages = result.get("messages")
             # Log tool use para PM2 (tras manager plan)

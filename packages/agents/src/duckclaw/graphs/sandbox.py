@@ -480,9 +480,13 @@ def _langsmith_log(intent: str, code: str, result: ExecutionResult, attempt: int
         if not api_key or os.environ.get("LANGCHAIN_TRACING_V2", "").lower() not in ("true", "1"):
             return
         from langsmith import Client  # noqa: PLC0415
+
+        from duckclaw.utils.langsmith_trace import create_completed_langsmith_run
+
         client = Client(api_key=api_key)
-        client.create_run(
-            name="strix_sandbox_execution",
+        create_completed_langsmith_run(
+            client,
+            name="StrixSandbox",
             run_type="tool",
             inputs={"intent": intent, "code": code, "attempt": attempt},
             outputs=result.to_dict(),

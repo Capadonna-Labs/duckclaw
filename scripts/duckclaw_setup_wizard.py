@@ -6,11 +6,13 @@ Spec: specs/FLUJO_VIDA_DATO_PIPELINE.md — gestiona DuckClaw-Gateway & DuckClaw
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import platform
 import re
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -98,7 +100,20 @@ def _confirm_with_nav(
         return default, None
     return default, None
 
-CONFIG_KEYS = ("mode", "channel", "bot_mode", "llm_provider", "llm_model", "llm_base_url", "db_path", "save_grpo_traces", "send_to_langsmith", "save_conversation_traces", "conversation_traces_format")
+CONFIG_KEYS = (
+    "mode",
+    "channel",
+    "bot_mode",
+    "llm_provider",
+    "llm_model",
+    "llm_base_url",
+    "db_path",
+    "save_grpo_traces",
+    "send_to_langsmith",
+    "save_conversation_traces",
+    "conversation_traces_format",
+    "gateway_pm2_name",
+)
 DEPLOY_PROVIDERS = ("auto", "pm2", "systemd", "windows", "cron")
 DEPLOY_SERVICE_NAME = "DuckClaw-Brain"
 GATEWAY_SERVICE_NAME = "DuckClaw-Gateway"  # spec FLUJO_VIDA_DATO: services/api-gateway
@@ -185,6 +200,85 @@ def _normalize_db_to_db_folder(raw: str, repo_root: Path) -> str:
     return f"db/{name}"
 
 
+def _resolve_db_path_prefer_existing(
+    raw: str,
+    repo_root: Path,
+    console: Console | None = None,
+) -> str:
+    """
+    Valida la entrada y, si ya existe un .duckdb con el mismo nombre bajo db/, usa esa ruta
+    (no fuerza db/<solo_nombre> si hay otra copia en db/private/...).
+    No sobrescribe archivos existentes: solo elige la ruta correcta antes de crear uno nuevo.
+    """
+    s = (raw or "").strip()
+    if not s or not _valid_db_path(s):
+        return _normalize_db_to_db_folder("telegram.duckdb", repo_root)
+
+    rr = repo_root.resolve()
+
+    # 1) Ruta literal (relativa al repo o absoluta) que apunta a un fichero existente
+    cand = Path(s)
+    if not cand.is_absolute():
+        full = (rr / cand).resolve()
+    else:
+        full = cand.resolve()
+    if full.is_file() and full.suffix.lower() == ".duckdb":
+        try:
+            rel = full.relative_to(rr)
+            out = str(rel).replace("\\", "/")
+        except ValueError:
+            out = str(full)
+        if console:
+            console.print(f"[green]✓[/] BD existente: [dim]{out}[/]")
+        return out
+
+    norm = _normalize_db_to_db_folder(s, repo_root)
+    norm_full = rr / norm.replace("/", os.sep)
+    if norm_full.is_file():
+        if console:
+            console.print(f"[green]✓[/] BD existente: [dim]{norm}[/]")
+        return norm
+
+    # 2) Mismo nombre de archivo: buscar db/**/<nombre>.duckdb
+    name = Path(norm).name
+    if not name.lower().endswith(".duckdb"):
+        name = name + ".duckdb"
+    try:
+        matches = sorted(
+            rr.glob(f"db/**/{name}"),
+            key=lambda p: (
+                0 if "private" in str(p).replace("\\", "/") else 1,
+                -len(str(p)),
+            ),
+        )
+    except Exception:
+        matches = []
+
+    if len(matches) == 1:
+        rel = matches[0].relative_to(rr)
+        out = str(rel).replace("\\", "/")
+        if console:
+            console.print(
+                f"[green]✓[/] Ya hay una BD [bold]{escape(name)}[/] en el repo → "
+                f"se usa [dim]{out}[/] (no se crea otra en db/ raíz)."
+            )
+        return out
+    if len(matches) > 1:
+        rel = matches[0].relative_to(rr)
+        out = str(rel).replace("\\", "/")
+        if console:
+            console.print("[yellow]Varias bases con el mismo nombre; se prioriza ruta bajo private/ o la más específica.[/]")
+            for m in matches[:6]:
+                try:
+                    console.print(f"  [dim]{m.relative_to(rr)}[/]")
+                except ValueError:
+                    pass
+            console.print(f"[green]✓[/] Se usa [bold]{escape(out)}[/]")
+        return out
+
+    return norm
+
+
 def load_config() -> dict[str, Any] | None:
     """Carga preferencias desde ~/.config/duckclaw/wizard_config.json. Siempre revisar primero antes de configurar desde 0."""
     path = _config_path()
@@ -210,6 +304,8 @@ def load_config() -> dict[str, Any] | None:
             elif k == "conversation_traces_format":
                 raw = (str(v).strip().lower() if v else "sft")
                 out[k] = raw if raw in ("grpo", "sft") else "sft"
+            elif k == "gateway_pm2_name":
+                out[k] = str(v).strip() if v else ""
             else:
                 out[k] = v if v is not None else ""
         if "last_deploy_provider" in data and isinstance(data["last_deploy_provider"], str):
@@ -298,6 +394,356 @@ def _ensure_pm2_inference_service(script_path: Path, cwd: Path) -> str:
         return f"Error ejecutando PM2 para inferencia: {e}"
 
 
+def _persist_gateway_pm2_name(name: str) -> None:
+    """Guarda el nombre PM2 del Gateway en wizard_config.json (merge, no borra otras claves)."""
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data: dict[str, Any] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+    n = (name or "").strip() or GATEWAY_SERVICE_NAME
+    data["gateway_pm2_name"] = n
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _is_gateway_service_name(
+    service_name: str,
+    state: dict[str, Any],
+    repo_root: Path | None = None,
+) -> bool:
+    """True si el nombre PM2 corresponde al Gateway (default, guardado en wizard o listado en api_gateways_pm2.json)."""
+    n = (service_name or "").strip()
+    if not n:
+        return False
+    if n == GATEWAY_SERVICE_NAME:
+        return True
+    saved = (state.get("gateway_pm2_name") or "").strip()
+    if bool(saved) and n == saved:
+        return True
+    if repo_root is not None:
+        try:
+            p = repo_root / "config" / "api_gateways_pm2.json"
+            if p.is_file():
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                for a in raw.get("apps") or []:
+                    if isinstance(a, dict) and (a.get("name") or "").strip() == n:
+                        return True
+        except Exception:
+            pass
+    return False
+
+
+def _tcp_port_in_use(port: int) -> bool:
+    """True si no se puede hacer bind a 0.0.0.0:port (otro proceso escuchando)."""
+    if port <= 0 or port > 65535:
+        return False
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("0.0.0.0", port))
+    except OSError:
+        return True
+    return False
+
+
+def _lsof_listen_hint(port: int) -> str:
+    """Salida de lsof para depurar [Errno 48] (macOS/Linux)."""
+    if platform.system() not in ("Darwin", "Linux"):
+        return ""
+    for cmd in (
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+        ["lsof", "-nP", f"-i:{port}"],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+            out = (r.stdout or "").strip()
+            if out:
+                return out
+        except Exception:
+            pass
+    return ""
+
+
+def _listen_pids_on_port(port: int) -> list[int]:
+    """PIDs que escuchan en TCP `port` (macOS/Linux)."""
+    if platform.system() not in ("Darwin", "Linux"):
+        return []
+    for cmd in (
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        ["lsof", "-nP", f"-tiTCP:{port}", "-sTCP:LISTEN"],
+        ["lsof", "-ti", f":{port}"],
+    ):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=6)
+            if r.returncode != 0:
+                continue
+            pids: list[int] = []
+            for line in (r.stdout or "").splitlines():
+                line = (line or "").strip()
+                if line.isdigit():
+                    pids.append(int(line))
+            if pids:
+                return pids
+        except Exception:
+            pass
+    return []
+
+
+def _pm2_pids_for_app_name(name: str) -> set[int]:
+    """PIDs que PM2 asocia a esta app (nombre del proceso)."""
+    out: set[int] = set()
+    n = (name or "").strip()
+    if not n or shutil.which("pm2") is None:
+        return out
+    try:
+        r = subprocess.run(["pm2", "jlist"], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return out
+        import json as _json
+
+        for p in _json.loads(r.stdout or "[]"):
+            if (p.get("name") or "").strip() != n:
+                continue
+            pid = p.get("pid")
+            if pid:
+                try:
+                    out.add(int(pid))
+                except (TypeError, ValueError):
+                    pass
+            pe = p.get("pm2_env") or {}
+            for key in ("pm_pid", "pid"):
+                v = pe.get(key)
+                if v:
+                    try:
+                        out.add(int(v))
+                    except (TypeError, ValueError):
+                        pass
+    except Exception:
+        pass
+    return out
+
+
+def _wizard_resolve_gateway_conflicts(console: Console, repo_root: Path) -> None:
+    """
+    Analiza config/api_gateways_pm2.json, muestra conflictos (puerto/DuckDB),
+    opcionalmente puertos ocupados en el host (bind + lsof) y guía para corregir.
+    """
+    try:
+        from duckclaw.ops.manager import analyze_gateway_cluster_conflicts, save_gateway_cluster_config
+    except Exception as e:
+        console.print(f"[red]No se pudo cargar duckclaw.ops.manager: {e}[/]")
+        return
+
+    cwd = str(repo_root.resolve())
+    gw_path = repo_root / "config" / "api_gateways_pm2.json"
+    if not gw_path.is_file():
+        console.print(
+            Panel(
+                "No existe config/api_gateways_pm2.json. "
+                "Crea uno con la configuración del API Gateway en el asistente o con "
+                "[dim]duckops serve --pm2 --gateway[/].",
+                title="Sin definición de gateways",
+                border_style="yellow",
+            )
+        )
+        return
+
+    report = analyze_gateway_cluster_conflicts(cwd)
+    apps: list[dict[str, Any]] = copy.deepcopy(report["apps"])
+    if not apps:
+        console.print("[yellow]No hay entradas en api_gateways_pm2.json.[/]")
+        return
+
+    console.print(
+        Panel(
+            "[bold]Conflictos típicos[/]\n"
+            "• [Errno 48] address already in use: mismo puerto en dos gateways en el JSON, "
+            "u otro proceso fuera de PM2 usando ese puerto.\n"
+            "• DuckDB: dos gateways con la misma ruta → locks / errores de concurrencia.\n"
+            "[dim]Finanz en 8000 y TheMind en 8080: usa [bold]BD distinta[/] por gateway "
+            "(p. ej. finanzdb1.duckdb vs the_mind.duckdb) para evitar locks DuckDB.[/]",
+            title="Resolver conflictos — API Gateways (PM2)",
+            border_style="cyan",
+        )
+    )
+
+    def _collect_used_ports(exclude_names: set[str] | None = None) -> set[int]:
+        ex = exclude_names or set()
+        u: set[int] = set()
+        for a in apps:
+            if not isinstance(a, dict):
+                continue
+            n = (a.get("name") or "").strip()
+            if n in ex:
+                continue
+            p = int(a.get("port") or 0)
+            if p > 0:
+                u.add(p)
+        return u
+
+    def _next_free_port(used: set[int], start: int) -> int:
+        p = max(1, min(int(start), 65535))
+        while p <= 65535 and p in used:
+            p += 1
+        return min(p, 65535)
+
+    def _find_app(gw_name: str) -> dict[str, Any] | None:
+        for a in apps:
+            if isinstance(a, dict) and (a.get("name") or "").strip() == gw_name:
+                return a
+        return None
+
+    dup_ports = report.get("duplicate_ports") or {}
+    dup_dbs = report.get("duplicate_databases") or {}
+
+    if dup_ports:
+        for pnum, group_names in sorted(dup_ports.items()):
+            console.print(
+                f"[red]Puerto {pnum} repetido en el JSON:[/] {', '.join(escape(str(x)) for x in group_names)}"
+            )
+            hint = _lsof_listen_hint(pnum)
+            if hint:
+                console.print(Panel(escape(hint[:6000]), title=f"lsof :{pnum}", border_style="dim"))
+
+    if dup_dbs:
+        for db_key, group_names in sorted(dup_dbs.items()):
+            console.print(
+                f"[red]Misma DUCKCLAW_DB_PATH (resuelta):[/] {', '.join(escape(str(x)) for x in group_names)}"
+            )
+            console.print(f"  [dim]{escape(db_key)}[/]")
+
+    # Diagnóstico de puerto: si ya escucha el propio PM2 de este gateway, no es conflicto.
+    for a in apps:
+        if not isinstance(a, dict):
+            continue
+        n = (a.get("name") or "").strip()
+        p = int(a.get("port") or 0)
+        if p <= 0:
+            continue
+        if _tcp_port_in_use(p):
+            listen_pids = _listen_pids_on_port(p)
+            pm2_pids = _pm2_pids_for_app_name(n)
+            if listen_pids and pm2_pids and (set(listen_pids) & pm2_pids):
+                console.print(
+                    f"[dim]Puerto {p} ([bold]{escape(n)}[/]): lo usa el propio proceso en PM2 "
+                    "(normal si el gateway ya está en marcha). No indica conflicto con otro servicio.[/]"
+                )
+                continue
+            console.print(
+                f"[yellow]⚠️  El puerto {p} ([bold]{escape(n)}[/]) parece ocupado en este host "
+                "(no se puede hacer bind). Revisa qué escucha ahí:[/]"
+            )
+            hint = _lsof_listen_hint(p)
+            if hint:
+                console.print(Panel(escape(hint[:6000]), title=f"lsof :{p}", border_style="dim"))
+            console.print(
+                "[dim]Si es un proceso antiguo, deténlo o cambia el puerto de este gateway. "
+                "`pm2 restart` no libera el puerto si otro binario lo tiene.[/]"
+            )
+
+    if not report.get("has_conflicts"):
+        console.print("[green]✓[/] No hay duplicados de puerto ni de DuckDB en api_gateways_pm2.json.")
+        return
+
+    if not Confirm.ask("¿Corregir ahora asignando puertos y/o rutas DuckDB distintas?", default=True):
+        return
+
+    # ── Puertos duplicados en el JSON ─────────────────────────────
+    for pnum, group_names in sorted(dup_ports.items()):
+        gset = set(group_names)
+        used = _collect_used_ports(exclude_names=gset)
+        sorted_gw = sorted(group_names)
+        for i, gwn in enumerate(sorted_gw):
+            app = _find_app(gwn)
+            if not app:
+                continue
+            cur = int(app.get("port") or 0)
+            if i == 0:
+                default_s = str(cur or pnum)
+                pr = Prompt.ask(
+                    f"Puerto HTTP para [bold]{escape(gwn)}[/] (antes compartía {pnum})",
+                    default=default_s,
+                ).strip()
+            else:
+                sug = _next_free_port(used, (cur or pnum) + i)
+                pr = Prompt.ask(
+                    f"Puerto HTTP para [bold]{escape(gwn)}[/] (distinto del resto)",
+                    default=str(sug),
+                ).strip()
+            try:
+                np = int(pr)
+                if 1 <= np <= 65535:
+                    app["port"] = np
+                    used.add(np)
+                else:
+                    console.print("[yellow]Puerto fuera de rango; se omite.[/]")
+            except ValueError:
+                console.print("[yellow]Valor no numérico; se omite.[/]")
+
+    # ── DuckDB compartida ───────────────────────────────────────
+    for _db_key, group_names in sorted(dup_dbs.items()):
+        sorted_gw = sorted(group_names)
+        for i, gwn in enumerate(sorted_gw):
+            app = _find_app(gwn)
+            if not app:
+                continue
+            env = app.get("env")
+            if not isinstance(env, dict):
+                env = {}
+                app["env"] = env
+            cur = (env.get("DUCKCLAW_DB_PATH") or "").strip()
+            safe_slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", gwn).strip("_").lower() or "gateway"
+            if not safe_slug.endswith(".duckdb"):
+                default_db = f"db/{safe_slug}.duckdb"
+            else:
+                default_db = f"db/{safe_slug}"
+            if i == 0:
+                pr = Prompt.ask(
+                    f"DUCKCLAW_DB_PATH para [bold]{escape(gwn)}[/] (Enter=mantener)",
+                    default=cur or default_db,
+                ).strip()
+            else:
+                pr = Prompt.ask(
+                    f"DUCKCLAW_DB_PATH para [bold]{escape(gwn)}[/] (ruta distinta)",
+                    default=default_db if not cur else f"db/{safe_slug}_2.duckdb",
+                ).strip()
+            if pr:
+                env["DUCKCLAW_DB_PATH"] = _normalize_db_to_db_folder(pr, repo_root)
+
+    try:
+        save_gateway_cluster_config(cwd, apps)
+        console.print("[green]✓[/] Guardado config/api_gateways_pm2.json y config/ecosystem.api.config.cjs")
+    except Exception as e:
+        console.print(f"[red]Error al guardar: {e}[/]")
+        return
+
+    if shutil.which("pm2") and Confirm.ask(
+        "¿Reiniciar en PM2 cada gateway con --update-env?",
+        default=True,
+    ):
+        for a in apps:
+            if isinstance(a, dict) and (a.get("name") or "").strip():
+                nm = (a.get("name") or "").strip()
+                r = subprocess.run(
+                    ["pm2", "restart", nm, "--update-env"],
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                    cwd=cwd,
+                )
+                if r.returncode == 0:
+                    console.print(f"[green]✓[/] pm2 restart {escape(nm)}")
+                else:
+                    console.print(
+                        f"[yellow]pm2 restart {escape(nm)}:[/] {escape((r.stderr or r.stdout or '')[:500])}"
+                    )
+
+
 def _save_last_deploy_provider(provider: str) -> None:
     """Guarda la última opción de proveedor de persistencia usada en wizard_config.json."""
     path = _config_path()
@@ -314,12 +760,113 @@ def _save_last_deploy_provider(provider: str) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _edit_gateway_service(console: Console, state: dict[str, Any], repo_root: Path) -> None:
+def _edit_gateway_service(
+    console: Console,
+    state: dict[str, Any],
+    repo_root: Path,
+    *,
+    preselected_pm2_name: str | None = None,
+    skip_name_prompt: bool = False,
+) -> None:
     """Gestiona DuckClaw-Gateway (spec FLUJO_VIDA_DATO: services/api-gateway)."""
+    gw_json = repo_root / "config" / "api_gateways_pm2.json"
+    if gw_json.is_file():
+        try:
+            raw = json.loads(gw_json.read_text(encoding="utf-8"))
+            reg = raw.get("apps") if isinstance(raw, dict) else None
+            if isinstance(reg, list) and reg:
+                console.print("[dim]Gateways ya definidos en config/api_gateways_pm2.json:[/]")
+                for a in reg:
+                    if isinstance(a, dict) and a.get("name"):
+                        console.print(
+                            f"  • [bold]{escape(str(a.get('name')))}[/] → "
+                            f"puerto [cyan]{a.get('port', '?')}[/]"
+                        )
+        except Exception:
+            pass
+        try:
+            from duckclaw.ops.manager import analyze_gateway_cluster_conflicts
+
+            rep = analyze_gateway_cluster_conflicts(str(repo_root.resolve()))
+            if rep.get("has_conflicts"):
+                console.print(
+                    Panel(
+                        "Hay conflictos en api_gateways_pm2.json (puerto o DuckDB duplicados). "
+                        "Sal al menú inicial y usa la opción [bold]r[/], o ejecuta:\n"
+                        "  [dim]python scripts/duckclaw_setup_wizard.py --resolve-gateways[/]",
+                        title="⚠️ Gateways: revisar conflictos",
+                        border_style="yellow",
+                    )
+                )
+        except Exception:
+            pass
+
+    ps = (preselected_pm2_name or "").strip()
+    if ps:
+        gateway_name = ps
+        state["gateway_pm2_name"] = gateway_name
+        _persist_gateway_pm2_name(gateway_name)
+    elif skip_name_prompt:
+        gateway_name = (state.get("gateway_pm2_name") or "").strip() or GATEWAY_SERVICE_NAME
+    else:
+        merged_cfg = load_config() or {}
+        if not isinstance(merged_cfg, dict):
+            merged_cfg = {}
+        hint = (merged_cfg.get("gateway_pm2_name") or "").strip() or GATEWAY_SERVICE_NAME
+        console.print(
+            f"[dim]Nombre estándar del spec: [bold]{GATEWAY_SERVICE_NAME}[/]. "
+            "Elige ese u otro por instancia (varios gateways = varios nombres/puertos).[/]"
+        )
+        use_std, nav = _confirm_with_nav(
+            console,
+            f"¿Usar [bold]{GATEWAY_SERVICE_NAME}[/] como nombre del proceso PM2?",
+            default=True,
+        )
+        if nav is not None:
+            return
+        if use_std:
+            gateway_name = GATEWAY_SERVICE_NAME
+        else:
+            gateway_name = Prompt.ask(
+                "Nombre PM2 personalizado",
+                default=hint,
+            ).strip() or GATEWAY_SERVICE_NAME
+        state["gateway_pm2_name"] = gateway_name
+        _persist_gateway_pm2_name(gateway_name)
+
+    port_default = "8000"
+    if gw_json.is_file():
+        try:
+            raw = json.loads(gw_json.read_text(encoding="utf-8"))
+            for a in raw.get("apps") or []:
+                if isinstance(a, dict) and (a.get("name") or "").strip() == gateway_name:
+                    port_default = str(int(a.get("port") or 8000))
+                    break
+        except Exception:
+            pass
+    console.print(
+        f"[dim]Puerto sugerido: [bold]{port_default}[/] "
+        "(desde config/api_gateways_pm2.json si ya existía esta entrada; por defecto 8000 si es nuevo). "
+        "Cada gateway debe usar un puerto distinto (p. ej. 8000, 8080, 8001).[/]"
+    )
+    port_raw = Prompt.ask(
+        "Puerto HTTP",
+        default=port_default,
+    ).strip() or port_default
+    try:
+        gw_port = int(port_raw)
+        if not (1 <= gw_port <= 65535):
+            raise ValueError
+    except Exception:
+        console.print("[yellow]Puerto inválido; uso 8000.[/]")
+        gw_port = 8000
+
     console.print(Panel(
         f"API Gateway (microservicio unificado)\n"
-        f"services/api-gateway → Redis → DB Writer → DuckDB",
-        title=GATEWAY_SERVICE_NAME,
+        f"services/api-gateway → Redis → DB Writer → DuckDB\n"
+        f"Proceso PM2: [bold]{escape(gateway_name)}[/]  Puerto: [bold]{gw_port}[/]\n"
+        f"[dim]Varios gateways conviven en config/api_gateways_pm2.json; no se borran otros PM2.[/]",
+        title="DuckClaw Gateway",
         border_style="cyan",
     ))
     db_path = _normalize_db_to_db_folder(
@@ -344,22 +891,27 @@ def _edit_gateway_service(console: Console, state: dict[str, Any], repo_root: Pa
                 from duckclaw.ops.manager import serve
                 code = serve(
                     host="0.0.0.0",
-                    port=8000,
+                    port=gw_port,
                     pm2=True,
                     gateway=True,
-                    name=GATEWAY_SERVICE_NAME,
+                    name=gateway_name,
                     cwd=str(repo_root),
+                    delete_pm2_name=None,
+                    gateway_db_path=db_path,
                 )
                 if code == 0:
                     console.print("[green]✓[/] Gateway configurado y reiniciado.")
                 else:
-                    console.print("[yellow]Revisa los logs: pm2 logs DuckClaw-Gateway[/]")
+                    console.print(f"[yellow]Revisa los logs: pm2 logs {escape(gateway_name)}[/]")
             except Exception as e:
                 console.print(f"[red]Error: {e}[/]")
                 console.print("[dim]Ejecuta manualmente: duckops serve --pm2 --gateway[/]")
             return
         # No regenerar: permitir editar ruta DB, Redis, guardar trazas, etc.
         console.print("[dim]Edita los valores (Enter = mantener actual).[/]")
+        gateway_name = Prompt.ask("Nombre proceso PM2 (Gateway)", default=gateway_name).strip() or gateway_name
+        state["gateway_pm2_name"] = gateway_name
+        _persist_gateway_pm2_name(gateway_name)
         new_db = Prompt.ask("DUCKCLAW_DB_PATH", default=db_path).strip() or db_path
         db_path = _normalize_db_to_db_folder(new_db, repo_root)
         new_redis = Prompt.ask("REDIS_URL", default=redis_url).strip() or redis_url
@@ -383,6 +935,62 @@ def _edit_gateway_service(console: Console, state: dict[str, Any], repo_root: Pa
         console.print(f"[green]✓[/] .env actualizado: DUCKCLAW_DB_PATH={db_path}, REDIS_URL=[dim]...[/], trazas={'sí' if save_traces_yes else 'no'}, formato={traces_fmt}")
         if not Confirm.ask("¿Seguir editando este servicio?", default=False):
             return
+
+
+def _offer_gateway_pm2_if_pm2(console: Console, state: dict[str, Any], repo_root: Path) -> None:
+    """
+    Tras la configuración completa: ofrece abrir el flujo del API Gateway (nombre PM2, BD, Redis).
+    No depende de haber elegido un proceso en el menú inicial (opción 0).
+    """
+    if not shutil.which("pm2"):
+        return
+    merged = load_config() or {}
+    if not isinstance(merged, dict):
+        merged = {}
+    save_conv = state.get("save_conversation_traces", True)
+    if isinstance(save_conv, str):
+        save_conv = str(save_conv).lower() in ("true", "1", "yes", "y", "sí", "si")
+    # Si guardan trazas de conversación (Gateway/API), sugerir sí por defecto
+    default_yes = bool(save_conv)
+
+    console.print()
+    console.print(Panel(
+        f"El API Gateway (FastAPI, n8n, Telegram vía Gateway) es un proceso PM2 distinto de "
+        f"[bold]{DEPLOY_SERVICE_NAME}[/].\n"
+        "Ahí defines nombre PM2, puerto, DUCKCLAW_DB_PATH y Redis; varios gateways se fusionan en "
+        "config/api_gateways_pm2.json sin borrar otros procesos PM2.",
+        title="API Gateway (spec FLUJO_VIDA_DATO)",
+        border_style="cyan",
+    ))
+    yes, nav = _confirm_with_nav(
+        console,
+        "¿Abrir ahora la configuración del API Gateway?",
+        default=default_yes,
+    )
+    if nav is not None or not yes:
+        return
+    saved_hint = (merged.get("gateway_pm2_name") or "").strip() or GATEWAY_SERVICE_NAME
+    console.print(
+        f"[dim]Nombre PM2 por defecto del spec: [bold]{GATEWAY_SERVICE_NAME}[/]. "
+        f"Último guardado en wizard: [bold]{escape(str(saved_hint))}[/] (solo como sugerencia).[/]"
+    )
+    use_std, nav2 = _confirm_with_nav(
+        console,
+        f"¿Usar el nombre estándar [bold]{GATEWAY_SERVICE_NAME}[/] para este API Gateway?",
+        default=True,
+    )
+    if nav2 is not None:
+        return
+    if use_std:
+        state["gateway_pm2_name"] = GATEWAY_SERVICE_NAME
+    else:
+        custom = Prompt.ask(
+            "Nombre PM2 personalizado",
+            default=saved_hint,
+        ).strip() or saved_hint
+        state["gateway_pm2_name"] = custom
+    _persist_gateway_pm2_name(state["gateway_pm2_name"])
+    _edit_gateway_service(console, state, repo_root, skip_name_prompt=True)
 
 
 def _edit_db_writer_service(console: Console, state: dict[str, Any], repo_root: Path) -> None:
@@ -478,8 +1086,13 @@ def _edit_service_settings(
     """Interactive sub-menu to edit and apply PM2 or Systemd service configuration."""
     _load_dotenv()
     # Pipeline (spec FLUJO_VIDA_DATO): Gateway y DB Writer tienen flujos específicos
-    if service_name == GATEWAY_SERVICE_NAME and provider == "pm2":
-        _edit_gateway_service(console, state, repo_root)
+    if _is_gateway_service_name(service_name, state, repo_root) and provider == "pm2":
+        _edit_gateway_service(
+            console,
+            state,
+            repo_root,
+            preselected_pm2_name=service_name,
+        )
         return
     if service_name == DB_WRITER_SERVICE_NAME and provider == "pm2":
         _edit_db_writer_service(console, state, repo_root)
@@ -550,7 +1163,7 @@ def _edit_service_settings(
         env_db or state.get("db_path") or "telegram.duckdb", repo_root
     )
     new_db_raw = Prompt.ask("Ruta DB (DuckDB)", default=cur_db).strip() or cur_db
-    new_db = _normalize_db_to_db_folder(new_db_raw, repo_root)
+    new_db = _resolve_db_path_prefer_existing(new_db_raw, repo_root, console)
     state["db_path"] = new_db
 
     # ── Token ────────────────────────────────────────────────────────
@@ -731,6 +1344,12 @@ def _ensure_db_file_exists(repo_root: Path, db_path: str, console: Console | Non
         p = (repo_root / p).resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
     if p.exists():
+        if console:
+            try:
+                rel = p.relative_to(repo_root.resolve())
+                console.print(f"[dim]BD ya existente (no se modifica): {rel}[/]")
+            except ValueError:
+                console.print(f"[dim]BD ya existente (no se modifica): {p}[/]")
         return True
     _orig_path = sys.path.copy()
     try:
@@ -745,58 +1364,6 @@ def _ensure_db_file_exists(repo_root: Path, db_path: str, console: Console | Non
         if console:
             console.print(f"[yellow]⚠[/] No se pudo crear la BD en {p}: {e}")
         return False
-    finally:
-        sys.path[:] = _orig_path
-
-
-def _industry_canonical_db_path_relative(repo_root: Path, tenant_id: str) -> str | None:
-    """Ruta relativa al repo: `db/private/<tenant>/default.duckdb` (spec Memoria Triple / Multi-Vault)."""
-    tid = (tenant_id or "default").strip() or "default"
-    os.environ.setdefault("DUCKCLAW_REPO_ROOT", str(repo_root.resolve()))
-    _orig_path = sys.path.copy()
-    try:
-        sys.path.insert(0, str(repo_root))
-        from duckclaw.vaults import vault_file_path
-
-        vp = vault_file_path(tid, "default")
-        return str(vp.resolve().relative_to(repo_root.resolve())).replace("\\", "/")
-    except Exception:
-        return None
-    finally:
-        sys.path[:] = _orig_path
-
-
-def _maybe_apply_industry_template(repo_root: Path, console: Console) -> None:
-    """Spec Memoria Triple v3.0: aplica schema+seed en db/private/<tenant>/default.duckdb si hay plantilla."""
-    tpl = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
-    if not tpl:
-        return
-    os.environ.setdefault("DUCKCLAW_REPO_ROOT", str(repo_root.resolve()))
-    tenant = (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip()
-    _orig_path = sys.path.copy()
-    try:
-        sys.path.insert(0, str(repo_root))
-        from duckclaw.forge.industries.loader import apply_industry_to_db
-        from duckclaw.vaults import ensure_tenant_industry_db
-
-        import duckdb
-
-        path = ensure_tenant_industry_db(tenant)
-        conn = duckdb.connect(str(path), read_only=False)
-        try:
-            apply_industry_to_db(conn, tpl)
-        finally:
-            conn.close()
-        console.print(
-            Panel(
-                f"Plantilla industry [bold]{escape(tpl)}[/] aplicada en [dim]{path}[/] "
-                f"(tenant [bold]{escape(tenant)}[/]).",
-                title="Memoria triple",
-                border_style="green",
-            )
-        )
-    except Exception as e:
-        console.print(Panel(escape(str(e)), title="Industry template (advertencia)", border_style="yellow"))
     finally:
         sys.path[:] = _orig_path
 
@@ -827,6 +1394,14 @@ def save_config(
     path.parent.mkdir(parents=True, exist_ok=True)
     fmt = (conversation_traces_format or "sft").strip().lower()
     fmt = fmt if fmt in ("grpo", "sft") else "sft"
+    prev: dict[str, Any] = {}
+    if path.exists():
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(prev, dict):
+                prev = {}
+        except Exception:
+            prev = {}
     data = {
         "mode": mode,
         "channel": channel,
@@ -840,6 +1415,8 @@ def save_config(
         "save_conversation_traces": save_conversation_traces,
         "conversation_traces_format": fmt,
     }
+    if isinstance(prev.get("gateway_pm2_name"), str) and prev["gateway_pm2_name"].strip():
+        data["gateway_pm2_name"] = prev["gateway_pm2_name"].strip()
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
@@ -894,7 +1471,10 @@ def _check_dependencies(console: Console) -> bool:
     except Exception:
         console.print(
             Panel(
-                "DuckClaw no está disponible.\nInstala: pip install -e . --no-build-isolation",
+                "DuckClaw no está disponible ([bold]import duckclaw[/]).\n"
+                "Desde la raíz del repo:\n"
+                "  • [bold]uv sync[/]  (recomendado)\n"
+                "  • o [bold]uv pip install -e . --no-build-isolation[/]",
                 title="❌ Error",
                 border_style="red",
             )
@@ -905,7 +1485,11 @@ def _check_dependencies(console: Console) -> bool:
     except Exception:
         console.print(
             Panel(
-                "Falta el extra de Telegram.\nInstala: pip install -e \".[telegram]\" --no-build-isolation",
+                "Falta [bold]python-telegram-bot[/] ([bold]import telegram[/]).\n"
+                "Desde la raíz del repo:\n"
+                "  • [bold]uv sync --extra telegram[/]\n"
+                "  • o [bold]uv pip install -e \".[telegram]\" --no-build-isolation[/]\n"
+                "  • o [bold]uv pip install python-telegram-bot[/]",
                 title="❌ Error",
                 border_style="red",
             )
@@ -1188,18 +1772,69 @@ def _run_section(
         return True, "", None
 
     if section_id == "token":
-        console.print(Panel("Token (no se guarda)", title="Token", border_style="cyan"))
+        console.print(
+            Panel(
+                "Origen del token de Telegram.\n"
+                "[dim]No se incluye en wizard_config.json; puede guardarse solo en .env.[/]",
+                title="Token de Telegram",
+                border_style="cyan",
+            )
+        )
         _load_dotenv()
         token_from_env = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+
         if token_from_env:
-            state["token"] = token_from_env
-            console.print("[dim]Token tomado de .env o TELEGRAM_BOT_TOKEN.[/]")
+            console.print(
+                f"[dim]Detectado [bold]TELEGRAM_BOT_TOKEN[/] en .env / entorno "
+                f"({_censor_token(token_from_env)}).[/]"
+            )
+            use_env, nav = _confirm_with_nav(
+                console,
+                "¿Usar ese token desde .env (TELEGRAM_BOT_TOKEN)?",
+                default=True,
+            )
+            if nav:
+                return True, "", nav
+            if use_env:
+                state["token"] = token_from_env
+            else:
+                console.print("[dim]Introduce el token manualmente (oculto al escribir).[/]")
+                val, nav_in = _prompt_with_nav(console, "TELEGRAM_BOT_TOKEN", password=True)
+                if nav_in:
+                    return True, "", nav_in
+                state["token"] = (val or "").strip()
+                if state.get("token"):
+                    save_e, nav_s = _confirm_with_nav(
+                        console,
+                        "¿Sobrescribir TELEGRAM_BOT_TOKEN en .env con este valor?",
+                        default=True,
+                    )
+                    if nav_s:
+                        return True, "", nav_s
+                    if save_e:
+                        _write_env_file(repo_root, "TELEGRAM_BOT_TOKEN", state["token"])
+                        os.environ["TELEGRAM_BOT_TOKEN"] = state["token"]
         else:
-            console.print("[dim]El token no se guarda por seguridad.[/]")
+            console.print(
+                "[yellow]No hay TELEGRAM_BOT_TOKEN en .env.[/]\n"
+                "[dim]Pégalo aquí o añádelo al archivo .env y vuelve a esta sección (a=anterior).[/]"
+            )
             val, nav = _prompt_with_nav(console, "TELEGRAM_BOT_TOKEN", password=True)
             if nav:
                 return True, "", nav
             state["token"] = (val or "").strip()
+            if state.get("token"):
+                save_e, nav_s = _confirm_with_nav(
+                    console,
+                    "¿Guardar TELEGRAM_BOT_TOKEN en .env?",
+                    default=True,
+                )
+                if nav_s:
+                    return True, "", nav_s
+                if save_e:
+                    _write_env_file(repo_root, "TELEGRAM_BOT_TOKEN", state["token"])
+                    os.environ["TELEGRAM_BOT_TOKEN"] = state["token"]
+
         if not state.get("token", "").strip():
             return False, "El token es obligatorio.", None
         ok, err = _validate_token_format(state["token"])
@@ -1217,7 +1852,11 @@ def _run_section(
 
     if section_id == "db_path":
         console.print(Panel("Ruta de la base de datos", title="DB", border_style="cyan"))
-        console.print("[dim]Se guardará en db/ con el mismo nombre. Ej: finanz.duckdb → db/finanz.duckdb[/]")
+        console.print(
+            "[dim]Puedes poner ruta completa bajo el repo (p. ej. db/private/…/finanz.duckdb). "
+            "Si solo indicas el nombre y ya existe otro .duckdb con el mismo nombre en db/, "
+            "se reutiliza ese archivo — no se crea uno nuevo en db/ raíz ni se sobrescribe.[/]"
+        )
         # Prioridad: última ruta guardada en config (JSON) → env DUCKCLAW_DB_PATH → fallback
         saved_path = state.get("db_path") if _valid_db_path(state.get("db_path")) else None
         env_path = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip() or None
@@ -1227,7 +1866,7 @@ def _run_section(
         if nav:
             return True, "", nav
         raw = (val or "").strip() or "telegram.duckdb"
-        state["db_path"] = _normalize_db_to_db_folder(raw, repo_root)
+        state["db_path"] = _resolve_db_path_prefer_existing(raw, repo_root, console)
         _ensure_db_file_exists(repo_root, state["db_path"], console)
         return True, "", None
 
@@ -1345,23 +1984,14 @@ def _run_section(
         console.print(Panel("Guardar y lanzar", title="Finalizar", border_style="green"))
         if not state.get("_used_preferences_skip"):
             if Confirm.ask("¿Guardar esta configuración para la próxima vez?", default=True):
-                db_path_save = _normalize_db_to_db_folder(
-                    state.get("db_path", "telegram.duckdb"), repo_root
+                db_path_save = _resolve_db_path_prefer_existing(
+                    str(state.get("db_path", "telegram.duckdb")),
+                    repo_root,
+                    console,
                 )
                 if not _valid_db_path(db_path_save):
                     db_path_save = "db/telegram.duckdb"
-                _it_save = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
-                if _it_save:
-                    _tid_save = (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip()
-                    _canon_save = _industry_canonical_db_path_relative(repo_root, _tid_save)
-                    if _canon_save:
-                        if _canon_save != db_path_save:
-                            console.print(
-                                "[cyan]Memoria industry:[/] se alinea [bold]DUCKCLAW_DB_PATH[/] a la bóveda del tenant "
-                                f"[dim]{_canon_save}[/] (misma DB que schema triple + seeds)."
-                            )
-                        db_path_save = _canon_save
-                        state["db_path"] = _canon_save
+                state["db_path"] = db_path_save
                 save_tr = state.get("save_grpo_traces", False)
                 if isinstance(save_tr, str):
                     save_tr = str(save_tr).lower() in ("true", "1", "yes", "y", "sí", "si")
@@ -1390,13 +2020,6 @@ def _run_section(
                 _write_env_file(repo_root, "DUCKCLAW_DB_PATH", db_path_save)
                 _write_env_file(repo_root, "DUCKCLAW_SAVE_CONVERSATION_TRACES", "true" if save_conv else "false")
                 _write_env_file(repo_root, "DUCKCLAW_CONVERSATION_TRACES_FORMAT", fmt_traces)
-                if _it_save:
-                    _write_env_file(repo_root, "DUCKCLAW_INDUSTRY_TEMPLATE", _it_save)
-                    _write_env_file(
-                        repo_root,
-                        "DUCKCLAW_TENANT_ID",
-                        (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip(),
-                    )
                 _ensure_db_file_exists(repo_root, db_path_save, console)
         state.pop("_used_preferences_skip", None)
         console.print()
@@ -1425,6 +2048,11 @@ def _run_section(
             t.add_row("auto", "Detecta el SO y elige pm2 (macOS) o systemd (Linux)")
             console.print(t)
             console.print("[dim]Si despliegas, el bot quedará registrado como servicio y se reiniciará solo.[/]")
+            console.print(
+                f"[dim]El proceso del bot es [bold]{DEPLOY_SERVICE_NAME}[/] (Telegram); "
+                "el API Gateway es otro servicio PM2 distinto (p. ej. {GATEWAY_SERVICE_NAME}) "
+                "y se ofrece configurar justo después del despliegue si hay PM2.[/]"
+            )
             console.print()
             deploy_yes, nav = _confirm_with_nav(console, "¿Desplegar bot como servicio persistente con duckops?", default=False)
             if nav is not None:
@@ -1494,6 +2122,10 @@ def _run_section(
                     console.print("[dim]Ejecutando duckclaw/mlx/start_mlx.sh en segundo plano.[/]")
                 except Exception as e:
                     console.print(f"[yellow]No se pudo ejecutar duckclaw/mlx/start_mlx.sh: {e}[/]")
+        # API Gateway (PM2): ofrecer aquí si hay PM2 y el bot ya estaba o acaba de desplegarse (antes de "arrancar ahora").
+        # Así no depende de responder "no" a arrancar el bot ni de terminar el polling en primer plano.
+        if shutil.which("pm2") and (service_exists or deploy_yes):
+            _offer_gateway_pm2_if_pm2(console, state, repo_root)
         if service_exists:
             console.print("[dim]Configuración guardada. El bot ya está en marcha con el servicio; no se arranca otra instancia.[/]")
             return True, "", None
@@ -1569,6 +2201,9 @@ def main() -> int:
 
 def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
     _load_dotenv()
+    if "--resolve-gateways" in sys.argv:
+        _wizard_resolve_gateway_conflicts(console, repo_root)
+        return 0
     # ── PASO 0: Detectar servicio de persistencia (SIEMPRE lo primero) ───
     console.print(Panel("[bold green]DuckClaw 🦆⚔️[/]", border_style="green"))
 
@@ -1650,34 +2285,64 @@ def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
             console.print("[dim]PM2 disponible. No hay procesos registrados aún.[/]")
 
         console.print(Panel(
-            "Se detectó PM2. Puedes editar un servicio del pipeline (spec FLUJO_VIDA_DATO) o continuar con la configuración completa.",
+            "Se detectó PM2. Puedes editar un servicio del pipeline (spec FLUJO_VIDA_DATO) o continuar con la configuración completa.\n"
+            "[dim]Si eliges la opción 0, al final del asistente se ofrecerá configurar el API Gateway "
+            "(nombre PM2 personalizado, BD, Redis) si lo necesitas.[/]",
             title="Servicio de persistencia",
             border_style="cyan",
         ))
-        # Siempre mostrar menú: 0 = configuración completa, 1..N = editar ese servicio
+        # Menú: 0 = config completa, r = conflictos gateways, 1..N = editar proceso
         found_svc: str | None = None
+        gw_json_menu = repo_root / "config" / "api_gateways_pm2.json"
         if pm2_procs:
             names = [p.get("name", "") for p in pm2_procs if p.get("name")]
             name_table = Table(show_header=False, box=None)
             name_table.add_row("0", "Continuar con configuración completa (no editar)")
+            name_table.add_row(
+                "r",
+                "Resolver conflictos API Gateway (puerto / DuckDB / lsof)",
+            )
             for i, n in enumerate(names, 1):
                 name_table.add_row(str(i), n)
             console.print(name_table)
             default_idx = 1
-            if GATEWAY_SERVICE_NAME in names:
+            saved_gw = (load_config() or {}).get("gateway_pm2_name")
+            saved_gw = (str(saved_gw).strip() if saved_gw else "") or GATEWAY_SERVICE_NAME
+            if saved_gw in names:
+                default_idx = names.index(saved_gw) + 1
+            elif GATEWAY_SERVICE_NAME in names:
                 default_idx = names.index(GATEWAY_SERVICE_NAME) + 1
             choice = Prompt.ask(
-                "Selecciona el servicio a editar [0=config completa]",
-                choices=[str(i) for i in range(0, len(names) + 1)],
+                "Selecciona [0=config completa, r=conflictos gateways]",
+                choices=[str(i) for i in range(0, len(names) + 1)] + ["r"],
                 default=str(default_idx),
             )
+            if choice == "r":
+                _wizard_resolve_gateway_conflicts(console, repo_root)
+                return 0
             idx = int(choice)
             if idx == 0:
                 found_svc = None  # continuar con configuración completa
             else:
                 found_svc = names[idx - 1]
         else:
-            # Sin procesos PM2 listados: ir a configuración completa
+            # Sin procesos PM2: aún se puede corregir api_gateways_pm2.json si existe
+            if gw_json_menu.is_file():
+                name_table = Table(show_header=False, box=None)
+                name_table.add_row("0", "Continuar con configuración completa (no editar)")
+                name_table.add_row(
+                    "r",
+                    "Resolver conflictos API Gateway (puerto / DuckDB / lsof)",
+                )
+                console.print(name_table)
+                choice = Prompt.ask(
+                    "Selecciona [0=config completa, r=conflictos gateways]",
+                    choices=["0", "r"],
+                    default="0",
+                )
+                if choice == "r":
+                    _wizard_resolve_gateway_conflicts(console, repo_root)
+                    return 0
             found_svc = None
         if found_svc is not None:
             saved_for_edit = load_config() or {}
@@ -1685,6 +2350,7 @@ def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
             for k in CONFIG_KEYS:
                 if k in saved_for_edit:
                     svc_state[k] = saved_for_edit[k]
+            svc_state.setdefault("gateway_pm2_name", GATEWAY_SERVICE_NAME)
             svc_state["token"] = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
             _edit_service_settings(console, svc_state, repo_root, found_svc, provider="pm2")
             return 0
@@ -1709,15 +2375,9 @@ def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
     state.setdefault("save_grpo_traces", True)
     state.setdefault("save_conversation_traces", True)
     state.setdefault("conversation_traces_format", "sft")
+    state.setdefault("gateway_pm2_name", GATEWAY_SERVICE_NAME)
     state.setdefault("send_to_langsmith", True)
     idx = 0
-
-    _ind_tpl = (os.environ.get("DUCKCLAW_INDUSTRY_TEMPLATE") or "").strip()
-    if _ind_tpl:
-        _tid = (os.environ.get("DUCKCLAW_TENANT_ID") or "default").strip()
-        _sug = _industry_canonical_db_path_relative(repo_root, _tid)
-        if _sug:
-            state["db_path"] = _sug
 
     while True:
         section_id = SECTION_IDS[idx]
@@ -1773,7 +2433,6 @@ def _main_inner(console: Console, repo_root: Path, bot_script: Path) -> int:
             break
         idx = next_i
 
-    _maybe_apply_industry_template(repo_root, console)
     return 0
 
 
