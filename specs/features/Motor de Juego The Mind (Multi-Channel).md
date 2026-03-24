@@ -67,7 +67,16 @@ Interceptar estos comandos en `services/api-gateway/main.py` (o en tu módulo de
 5.  **Bucle de DMs:** Para cada jugador, llamar a `send_dm(chat_id, f"Tus cartas para el Nivel 1 son: {sus_cartas}")`.
 6.  **Broadcast:** *"¡El Nivel 1 ha comenzado! Concéntrense... 🤫"*
 
-### D. `/play <numero>` (El Bucle Crítico)
+### D. `/game` (Listar partidas activas)
+
+Listar partidas con `status` en `waiting` o `playing`, con conteo de jugadores y metadatos (`current_level`, `lives`). Implementado en `execute_list_mind_games` (`on_the_fly_commands.py`).
+
+### E. Backlog de reglas (no implementado aún)
+
+- **Shurikens:** la columna `shurikens` existe en `the_mind_games` pero no hay comando `/shuriken` ni consumo del contador; pendiente alinear con reglas oficiales (revelar mínimo en mano, etc.).
+- **Tras perder una vida:** el motor actual descarta cartas menores y continúa el mismo nivel; valorar si el diseño deseado es **repartir de nuevo** el nivel actual (reglas de mesa).
+
+### F. `/play <numero>` (El Bucle Crítico)
 *Esta es la transacción atómica que define el juego.*
 
 ```python

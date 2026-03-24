@@ -36,17 +36,30 @@ The Mind es un juego de cartas cooperativo. Los jugadores tienen cartas numerada
 
 ## 3. Variables de entorno (outbound / n8n)
 
-El motor usa **la primera URL definida** entre (en orden):
+El motor usa **la primera URL definida** entre (en orden; alineado con `send_proactive_message` / homeostasis):
 
 | Variable | Uso |
 |----------|-----|
-| `DUCKCLAW_TELEGRAM_SEND_WEBHOOK_URL` | Webhook preferido para Telegram |
-| `DUCKCLAW_SEND_DM_WEBHOOK_URL` | Alternativa DM |
-| `N8N_OUTBOUND_WEBHOOK_URL` | Webhook genérico n8n (mismo contrato) |
+| `N8N_OUTBOUND_WEBHOOK_URL` | Mismo webhook n8n que mensajes proactivos y el resto de salidas |
+| `DUCKCLAW_TELEGRAM_SEND_WEBHOOK_URL` | Override opcional solo para Telegram |
+| `DUCKCLAW_SEND_DM_WEBHOOK_URL` | Override opcional solo para DM |
 
-**Payload JSON:** `{"chat_id": "<id>", "text": "<mensaje>"}`
+**Payload JSON:** `{"chat_id": "<id>", "user_id": "<id>", "text": "<mensaje>"}`  
+(`user_id` repite el mismo valor que `chat_id` para flujos n8n que solo lean `user_id`.)
 
-**Autenticación opcional:** `N8N_AUTH_KEY` se envía en la cabecera `X-N8N-Auth` (también compatible con flujos que esperan el mismo secreto).
+**Autenticación opcional:**
+
+- `N8N_AUTH_KEY` → cabeceras `X-N8N-Auth` y `X-DuckClaw-Secret` (mismo valor, por compatibilidad con distintos nodos HTTP).
+- `DUCKCLAW_WEBHOOK_SECRET` → solo `X-DuckClaw-Secret` (si está definido, tiene prioridad sobre el duplicado desde `N8N_AUTH_KEY`).
+
+---
+
+### Si no llegan los DMs
+
+1. **Variables en el proceso del gateway (p. ej. PM2 `TheMind-Gateway`):** debe existir `N8N_OUTBOUND_WEBHOOK_URL` (recomendado, igual que mensajes proactivos) u otra URL de la tabla. Si ninguna está definida, `/start_mind` guarda las cartas en DuckDB pero el resumen dirá `skipped_no_url`.
+2. **n8n:** el workflow de entrada (Telegram → gateway) no sustituye el webhook de **salida**. Necesitas un flujo que reciba el POST del gateway y llame a Telegram `sendMessage` con el `chat_id` del JSON.
+3. **Ejecuciones fallidas:** revisa logs del gateway (`duckclaw.the_mind_outbound`): errores HTTP o timeouts aparecen como warning. En n8n, revisa el webhook de salida (código 401/404).
+4. **Mínimo 2 jugadores:** `/start_mind` exige dos filas en `the_mind_players` salvo que definas `DUCKCLAW_THE_MIND_ALLOW_SOLO=true`.
 
 ---
 
@@ -59,7 +72,8 @@ El estado vive en DuckDB (`the_mind_games`, `the_mind_players`) en la **bóveda 
 | **`/new_mind`** | Crea partida (alias de `/new_game the_mind`). El creador queda registrado como jugador. |
 | **`/new_game the_mind`** | Igual que arriba. |
 | **`/join <game_id>`** | Unirse desde el DM del bot. |
-| **`/start_mind [game_id]`** | Pone la partida en `playing`, reparte **Nivel 1** (1 carta por jugador), envía cartas por DM y anuncia el inicio a todos. |
+| **`/start_mind [game_id]`** | Pone la partida en `playing`, reparte **Nivel 1** (1 carta por jugador), envía cartas por DM y anuncia el inicio a todos. La respuesta resume cuántos DMs fueron OK o fallidos. |
+| **`/game`** | Lista partidas en `waiting` o `playing` con jugadores, nivel y vidas (alias: `/games`, `/mind_games`). |
 | **`/play <n>`** | Jugar carta `n` (1–100). Validación atómica; error = −1 vida y limpieza de cartas menores. |
 | **`/deal [game_id]`** | Reparte de nuevo según `current_level` (p. ej. tras subir de nivel). |
 | **`/start_game [game_id]`** | Solo pasa a `playing` sin repartir (compatibilidad). |
@@ -106,6 +120,7 @@ Tras Nivel 1 con 2 jugadores y jugadas correctas: manos vacías, `cards_played` 
 /workers --add TheMindCrupier
 /new_mind
 /join <game_id>          # cada jugador, por DM
+/game                    # opcional: ver partidas activas
 /start_mind [game_id]
 /play 15                  # en tu DM
 ```

@@ -744,11 +744,13 @@ def _the_mind_invite_hint(db: Any, tenant_id: str | None, game_id: str) -> str:
         "\n\n---\n"
         "Cómo invitar e iniciar:\n"
         "• Solo pueden unirse quienes estén en /team (tenant actual).\n"
+        "• Las cartas solo se envían a los chat_id registrados en la partida: cada jugador debe /join desde su DM con el bot (no basta con un grupo).\n"
+        "• Requiere webhook de salida en el gateway (p. ej. DUCKCLAW_TELEGRAM_SEND_WEBHOOK_URL); si falta, verás aviso al iniciar.\n"
         "• Cartas: cada jugador recibe un mensaje distinto por DM.\n"
         "• Avisos del juego (nivel, errores, victoria): el mismo texto a todos los DM de la partida.\n"
         f"• Equipo autorizado ahora:\n{team_block}\n"
         f"• Pasos: cada jugador abre DM con el bot y envía /join {game_id}.\n"
-        f"• Luego el anfitrión: /start_mind {game_id}\n"
+        f"• Luego el anfitrión: /start_mind {game_id} (mínimo 2 jugadores; ver /game).\n"
     )
 
 
@@ -793,7 +795,8 @@ def execute_new_game(
         rid = str(requester_id or "").strip() or None
         _merge_the_mind_player(db, game_id, cid, uname, user_id=rid)
         base = _telegram_safe(
-            f"🧠 The Mind: partida creada con id {game_id}. Dile a tus amigos que me envíen `/join {game_id}` por DM."
+            f"🧠 The Mind: partida creada con id {game_id}. "
+            f"Cada jugador debe enviar `/join {game_id}` desde el chat privado (DM) con el bot para quedar registrado y recibir cartas."
         )
         return base + _the_mind_invite_hint(db, tid, game_id)
     except Exception as e:
@@ -839,6 +842,40 @@ def execute_join_game(
         )
     except Exception as e:
         return _telegram_safe(f"No se pudo unir a la partida: {e}")
+
+
+def execute_list_mind_games(db: Any, chat_id: Any, args: str) -> str:
+    """/game: partidas The Mind en waiting o playing (conteo de jugadores)."""
+    try:
+        _ensure_the_mind_schema(db)
+        rows = list(
+            db.execute(
+                """
+                SELECT g.game_id, g.status, g.current_level, g.lives,
+                       COUNT(p.chat_id) AS n
+                FROM the_mind_games g
+                LEFT JOIN the_mind_players p ON p.game_id = g.game_id
+                WHERE lower(COALESCE(g.status, '')) IN ('waiting', 'playing')
+                GROUP BY g.game_id, g.status, g.current_level, g.lives
+                ORDER BY g.game_id DESC
+                """
+            )
+        )
+    except Exception as e:
+        return _telegram_safe(f"No se pudo listar partidas: {e}")
+    if not rows:
+        return _telegram_safe(
+            "No hay partidas activas (waiting/playing). Usa /new_mind para crear una."
+        )
+    lines: list[str] = []
+    for r in rows:
+        gid, st, lvl, lives, n = r[0], r[1], r[2], r[3], r[4]
+        lines.append(
+            f"• {gid} — estado={st or '?'} | jugadores={int(n or 0)} | "
+            f"nivel={int(lvl or 1)} | vidas={int(lives or 0)}"
+        )
+    body = "\n".join(lines)
+    return _telegram_safe(f"🧠 Partidas activas:\n{body}")
 
 
 def execute_start_game(db: Any, chat_id: Any, args: str) -> str:
@@ -954,6 +991,19 @@ def execute_start_mind(
         if count < 1:
             return _telegram_safe("No hay jugadores en esta partida.")
 
+        allow_solo = (os.environ.get("DUCKCLAW_THE_MIND_ALLOW_SOLO") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if count < 2 and not allow_solo:
+            return _telegram_safe(
+                f"Solo hay {count} jugador(es) en la partida {game_id}. "
+                "Se necesitan al menos 2: cada uno debe enviar `/join "
+                f"{game_id}` por DM con el bot. Usa /game para ver el estado. "
+                "(Modo 1 jugador: define DUCKCLAW_THE_MIND_ALLOW_SOLO=true en el gateway.)"
+            )
+
         ok_roster, err_roster = _all_mind_players_in_team(db, game_id, tid)
         if not ok_roster:
             return _telegram_safe(err_roster)
@@ -963,14 +1013,16 @@ def execute_start_mind(
             "cards_played = ARRAY[]::INTEGER[] WHERE game_id = ?",
             (game_id,),
         )
-        deal_cards_for_level(db, game_id, 1)
-        broadcast_message_to_players(
+        deal_res = deal_cards_for_level(db, game_id, 1)
+        broad_res = broadcast_message_to_players(
             db,
             game_id,
             "¡El Nivel 1 ha comenzado! Concéntrense... 🤫",
         )
         return _telegram_safe(
-            f"🧠 Partida {game_id} iniciada: Nivel 1 repartido por DM y anunciado a los jugadores."
+            f"🧠 Partida {game_id} iniciada (Nivel 1 en BD).\n"
+            f"• {deal_res.summary_line}\n"
+            f"• {broad_res.summary_line}"
         )
     except Exception as e:
         return _telegram_safe(f"No se pudo iniciar The Mind: {e}")
@@ -1012,8 +1064,8 @@ def execute_deal(db: Any, chat_id: Any, args: str) -> str:
             if not lr:
                 return _telegram_safe(f"No hay partida en juego con id {game_id}.")
             lvl = int(lr[0][0] or 1)
-        out = deal_cards_for_level(db, game_id, lvl)
-        return _telegram_safe(f"🃏 {out}")
+        deal_res = deal_cards_for_level(db, game_id, lvl)
+        return _telegram_safe(f"🃏 {deal_res.summary_line}")
     except Exception as e:
         return _telegram_safe(f"No se pudo repartir: {e}")
 
@@ -1659,6 +1711,7 @@ def execute_help(db: Any, chat_id: Any) -> str:
         (_telegram_safe("/new_mind"), _telegram_safe("The Mind: crear partida (alias de /new_game the_mind)")),
         (_telegram_safe("/join <game_id>"), _telegram_safe("The Mind: unirse a partida")),
         (_telegram_safe("/start_mind [game_id]"), _telegram_safe("The Mind: iniciar y repartir Nivel 1")),
+        (_telegram_safe("/game"), _telegram_safe("The Mind: listar partidas waiting/playing")),
         (_telegram_safe("/play <n>"), _telegram_safe("The Mind: jugar carta")),
         (_telegram_safe("/setup"), _telegram_safe("Config key=value")),
         (_telegram_safe("/approve"), _telegram_safe("Aprobar última acción")),
@@ -1721,6 +1774,8 @@ def _dispatch_fly_command(
         return execute_join_game(
             db, chat_id, args, requester_id=requester_id, tenant_id=tenant_id
         )
+    if name in ("game", "games", "mind_games"):
+        return execute_list_mind_games(db, chat_id, args)
     if name == "start_game":
         return execute_start_game(db, chat_id, args)
     if name == "deal":

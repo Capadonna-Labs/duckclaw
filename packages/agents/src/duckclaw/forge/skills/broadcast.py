@@ -26,7 +26,7 @@ def broadcast_message(game_id: str, message: str) -> str:
     Úsalo para anunciar el inicio del nivel, errores o victorias.
     """
     db = get_gateway_db()
-    return broadcast_message_to_players(db, game_id, message)
+    return str(broadcast_message_to_players(db, game_id, message))
 
 
 @tool
@@ -35,7 +35,7 @@ def deal_cards(game_id: str, level: int) -> str:
     Reparte cartas a los jugadores según el nivel actual y se las envía por mensaje privado.
     """
     db = get_gateway_db()
-    return deal_cards_for_level(db, game_id, level)
+    return str(deal_cards_for_level(db, game_id, level))
 
 
 __all__ = [
