@@ -1122,7 +1122,6 @@ def execute_list_mind_games(
             return _telegram_safe(f"🗑️ Partida(s) cancelada(s): [{game_id}]")
         except Exception as e:
             return _telegram_safe(f"No se pudo cancelar partidas: {e}")
-
     try:
         _ensure_the_mind_schema(db)
         rows = list(
@@ -1186,15 +1185,17 @@ def execute_list_mind_games(
                 (gid,),
             )
         )
+        # Importante: evitar Markdown links `[...] (tg://...)` aquí, porque algunos nodos Telegram
+        # (n8n) usan parse_mode Markdown/MarkdownV2 y pueden fallar con entidades TextUrl anidadas.
         players_labels = [
-            f"{_player_label(uname, pchat, db=db, tenant_id=tid)} ({str(pchat or '').strip()})"
+            _player_label_log(uname, pchat, db=db, tenant_id=tid)
             for pchat, uname in players_rows
         ]
         players_text = ", ".join(players_labels) if players_labels else "sin jugadores"
         lines.append(
             f"• {gid} — estado={st or '?'} | jugadores={int(n or 0)} | "
             f"nivel={int(lvl or 1)} | vidas={int(lives or 0)} | "
-            f"participantes=[{players_text}]"
+            f"participantes={players_text}"
         )
     body = "\n".join(lines)
     return _telegram_safe(f"🧠 Partidas activas:\n{body}")
