@@ -35,6 +35,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 import redis.asyncio as redis
 
+from core.chat_history import (
+    gateway_chat_history_enabled,
+    history_redis_key,
+    normalize_history_list,
+    normalize_history_item,
+    redis_load_chat_history,
+    redis_save_chat_history,
+)
 from core.models import ChatRequest
 from duckclaw.vaults import ensure_registry as ensure_vault_registry
 from duckclaw.vaults import resolve_active_vault, validate_user_db_path
@@ -129,6 +137,7 @@ except ImportError:
         PROJECT_NAME = "DuckClaw API Gateway"
         VERSION = "0.1.0"
         REDIS_URL = "redis://localhost:6379/0"
+
     settings = _Settings()
 
 # Logs estructurados (Observabilidad 2.0)
@@ -439,8 +448,45 @@ async def agent_workers():
 
 
 @app.get("/api/v1/agent/{worker_id}/history")
-async def agent_history(worker_id: str, session_id: str = "default"):
-    return {"history": [], "worker_id": worker_id}
+async def agent_history(
+    request: Request,
+    worker_id: str,
+    session_id: str | None = None,
+    chat_id: str | None = None,
+    tenant_id: str | None = None,
+):
+    """
+    Historial persistido en Redis (mismas claves que ``POST .../chat`` cuando no se envía ``history`` en el body).
+
+    Usar el mismo ``session_id`` / ``chat_id`` que en el chat y el mismo tenant (query ``tenant_id``,
+    cabecera ``X-Tenant-Id``, o el default efectivo del proceso).
+    """
+    redis_client = getattr(request.app.state, "redis", None)
+    sid = (
+        (session_id or "").strip()
+        or (chat_id or "").strip()
+        or (request.headers.get("X-Chat-Id") or "").strip()
+        or (request.headers.get("X-Session-Id") or "").strip()
+        or "default"
+    )
+    tid_src = (tenant_id or "").strip() or (request.headers.get("X-Tenant-Id") or "").strip() or None
+    tid = _effective_tenant_id(tid_src)
+    hist = await redis_load_chat_history(redis_client, tid, sid)
+    from core.leila_output_guard import is_leila_store_tenant, scrub_leila_history_assistant_messages
+
+    if is_leila_store_tenant(tid):
+        hist = scrub_leila_history_assistant_messages(hist)
+    out: dict[str, Any] = {
+        "history": hist,
+        "worker_id": worker_id,
+        "tenant_id": tid,
+        "session_id": sid,
+    }
+    if (os.environ.get("DUCKCLAW_GATEWAY_HISTORY_DEBUG") or "").strip().lower() in ("1", "true", "yes"):
+        out["redis_key"] = history_redis_key(tid, sid)
+        out["redis_connected"] = redis_client is not None
+        out["gateway_chat_history_enabled"] = gateway_chat_history_enabled()
+    return out
 
 
 def _resolve_chat_session_id(body: ChatRequest, req: Request) -> tuple[str, str]:
@@ -615,12 +661,19 @@ async def _authorize_or_reject(*, tenant_id: str, user_id: str, is_owner: bool) 
 
 def _effective_tenant_id(request_tenant: str | None) -> str:
     """
-    Tenant efectivo para este gateway. Si DUCKCLAW_GATEWAY_TENANT_ID está definido (p. ej. en PM2
-    para Leila-Gateway), sustituye el valor del body / default y unifica whitelist + logs.
+    Tenant efectivo para Redis, whitelist y logs.
 
-    Si la variable no llegó al proceso (PM2 sin reload), Leila-Gateway sigue el nombre de tenant
-    acordado en config/api_gateways_pm2.json: \"Leila Store\".
+    Si el cliente envía un tenant explícito (query, header o body) distinto del placeholder
+    ``default``, ese valor **gana**: debe coincidir con el GET ``/history`` y el POST ``/chat``
+    (misma clave ``duckclaw:gateway:chat_hist:{tenant}:{session}``).
+
+    Si solo llega ``default`` u omisión, aplica DUCKCLAW_GATEWAY_TENANT_ID, heurística PM2
+    Leila-Gateway / leiladb, y por último ``default``.
     """
+    rt = (request_tenant or "").strip()
+    if rt and rt.lower() != "default":
+        return rt
+
     override = (os.getenv("DUCKCLAW_GATEWAY_TENANT_ID") or "").strip()
     if override:
         return override
@@ -629,7 +682,7 @@ def _effective_tenant_id(request_tenant: str | None) -> str:
     dbp = (os.getenv("DUCKCLAW_DB_PATH") or "").lower()
     if "leiladb" in dbp:
         return "Leila Store"
-    return (request_tenant or "default").strip() or "default"
+    return rt or "default"
 
 
 @app.post("/api/v1/agent/chat")
@@ -649,7 +702,11 @@ async def agent_chat(
     if body is None:
         body = ChatRequest(message="", chat_id="default", user_id="system", username="system", chat_type="private")
     session_id, session_source = _resolve_chat_session_id(body, http_request)
-    tenant_id = _effective_tenant_id(body.tenant_id)
+    body_tid = (body.tenant_id or "").strip() or "default"
+    hdr_tid = (http_request.headers.get("X-Tenant-Id") or "").strip()
+    if body_tid.lower() == "default" and hdr_tid:
+        body_tid = hdr_tid
+    tenant_id = _effective_tenant_id(None if body_tid.lower() == "default" else body_tid)
     chat_ident = _chat_identity_label(session_id, body.username)
     set_log_context(tenant_id=tenant_id, worker_id="manager", chat_id=chat_ident)
     if session_source == "default" and not (body.chat_id or "").strip():
@@ -667,7 +724,14 @@ async def agent_chat(
             format_chat_id_for_terminal(chat_ident),
             session_source,
         )
-    return await _invoke_chat(body, worker_id or "finanz", session_id=session_id, tenant_id=tenant_id)
+    redis_client = getattr(http_request.app.state, "redis", None)
+    return await _invoke_chat(
+        body,
+        worker_id or "finanz",
+        session_id=session_id,
+        tenant_id=tenant_id,
+        redis_client=redis_client,
+    )
 
 
 def _truncate_log(s: str, max_len: int = 200) -> str:
@@ -708,7 +772,14 @@ def clean_agent_response(response: str) -> str:
     return text.strip()
 
 
-async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, tenant_id: str):
+async def _invoke_chat(
+    payload: ChatRequest,
+    worker_id: str,
+    session_id: str,
+    tenant_id: str,
+    *,
+    redis_client: Any = None,
+):
     """
     Orquesta la llamada al grafo LangGraph a partir de un ChatRequest.
 
@@ -732,6 +803,20 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     history = payload.history or []
     is_system_prompt = bool(payload.is_system_prompt or False)
     shared_db_path = (payload.shared_db_path or "").strip() or None
+    history_for_model = normalize_history_list(list(history))
+    if (
+        not is_system_prompt
+        and redis_client is not None
+        and gateway_chat_history_enabled()
+        and not history_for_model
+    ):
+        history_for_model = await redis_load_chat_history(redis_client, tenant_id, session_id)
+
+    if not is_system_prompt:
+        from core.leila_output_guard import is_leila_store_tenant, scrub_leila_history_assistant_messages
+
+        if is_leila_store_tenant(tenant_id):
+            history_for_model = scrub_leila_history_assistant_messages(history_for_model)
 
     # Observabilidad 2.1: fase orquestación HTTP → worker lógico "manager" (no el worker_id de ruta).
     chat_ident = _chat_identity_label(session_id, username)
@@ -862,7 +947,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
             result = await _ainvoke(
                 graph,
                 message,
-                history or [],
+                history_for_model,
                 session_id,
                 tenant_id=tenant_id,
                 user_id=vault_user_id,
@@ -916,6 +1001,13 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         except Exception:
             pass
     reply_text = result.get("reply", "") if isinstance(result, dict) else (result or "")
+    # Evitar doble escape Telegram: historial/n8n a veces reinyecta texto ya escapado y el modelo lo copia.
+    try:
+        from duckclaw.graphs.on_the_fly_commands import unescape_telegram_markdown_v2_layers
+
+        reply_text = unescape_telegram_markdown_v2_layers(reply_text or "")
+    except Exception:
+        pass
     # Grafo manager devuelve assigned_worker_id; refinar contexto de log para [RES]
     effective_worker_id = result.get("assigned_worker_id", worker_id) if isinstance(result, dict) else worker_id
     set_log_context(
@@ -946,6 +1038,12 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     reply_text = _strip_markdown_bold(reply_text or "")
     # Filtro UX: eliminar menús residuales del LLM antes de devolver al cliente
     reply_text = clean_agent_response(reply_text or "")
+    if (effective_worker_id or worker_id or "").strip() == "LeilaAssistant":
+        from core.leila_output_guard import scrub_leila_contact_surface
+
+        reply_text = scrub_leila_contact_surface(reply_text)
+    # Texto plano para Redis/trazas; _telegram_safe solo en la respuesta al cliente (evita \\ que crece cada turno).
+    reply_plain_for_storage = reply_text
     try:
         if not result.get("_audit_done"):
             from duckclaw.graphs.on_the_fly_commands import append_task_audit, get_worker_id_for_chat
@@ -966,7 +1064,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
             system_from_prompt = (get_effective_system_prompt(db, effective_worker_id) or "").strip()
             system_for_trace = system_from_prompt or (os.environ.get("DUCKCLAW_SYSTEM_PROMPT") or "").strip() or None
             append_conversation_trace(
-                session_id, message, reply_text or "",
+                session_id, message, reply_plain_for_storage or "",
                 worker_id=effective_worker_id, elapsed_ms=elapsed_ms, status="SUCCESS",
                 system_prompt=system_for_trace,
                 messages=trace_messages,
@@ -975,9 +1073,23 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         pass
     try:
         from duckclaw.graphs.on_the_fly_commands import _telegram_safe
-        reply_text = _telegram_safe(reply_text)
+        reply_text = _telegram_safe(reply_plain_for_storage)
     except Exception:
         pass
+    if (
+        not is_system_prompt
+        and redis_client is not None
+        and gateway_chat_history_enabled()
+    ):
+        u = normalize_history_item({"role": "user", "content": message})
+        a = normalize_history_item({"role": "assistant", "content": reply_plain_for_storage})
+        if u and a:
+            await redis_save_chat_history(
+                redis_client,
+                tenant_id,
+                session_id,
+                history_for_model + [u, a],
+            )
     return {
         "response": reply_text,
         "session_id": session_id,
@@ -1006,7 +1118,7 @@ async def enqueue_write(req: WriteRequest):
     """Encola escrituras para el DB Writer (evita bloqueos en DuckDB)."""
     if req.query.strip().upper().startswith("SELECT"):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_400_BAD_REQUEST, 
             detail="Las consultas SELECT deben ejecutarse directamente, no encolarse.",
         )
     task_id = str(uuid.uuid4())

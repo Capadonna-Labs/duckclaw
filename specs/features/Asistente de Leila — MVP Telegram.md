@@ -4,6 +4,16 @@
 Agente de ventas para Leila Store en Telegram. Muestra catálogo,
 toma pedidos y notifica al admin. Sin pagos, sin inventario en tiempo real.
 
+## Prompt del worker (LeilaAssistant)
+- `forge/templates/LeilaAssistant/soul.md`: voz, tono y reglas comerciales.
+- `forge/templates/LeilaAssistant/system_prompt.md`: SQL, tablas y uso de herramientas; incluye prohibición explícita de mencionar comandos `/` al usuario final.
+- Al cargar el template, `load_system_prompt` concatena ambos (soul primero, separador `---`, luego system) si existen.
+
+## Historial multi-turno (Gateway)
+- Si el body trae `history: []` (p. ej. n8n solo reenvía el mensaje actual), el API Gateway rellena desde Redis (`duckclaw:gateway:chat_hist:{tenant_id}:{session_id}`) y, tras cada respuesta del grafo, guarda el par usuario/asistente.
+- Si el cliente envía `history` no vacío, se usa tal cual (sin cargar Redis) y al final se persiste la lista ampliada con el nuevo turno.
+- Desactivar: `DUCKCLAW_GATEWAY_CHAT_HISTORY=false`. Límites opcionales: `DUCKCLAW_CHAT_HISTORY_MAX_MSGS`, `DUCKCLAW_CHAT_HISTORY_TTL_SEC` (por defecto 604800 s = 7 días).
+
 ## Tenant
 - Canal: Telegram DM
 - Admin: tu mamá (chat_id por definir)

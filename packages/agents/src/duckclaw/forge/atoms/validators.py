@@ -2,6 +2,16 @@
 Context-Guard: FactCheckerNode y SelfCorrectionNode para prevención de alucinaciones.
 
 Spec: specs/RAG_Fact_Checker_Context_Guard.md
+
+Próxima fase (retail / LeilaAssistant, salida determinista):
+    Añadir un paso de validación **después** del modelo (p. ej. en ``set_reply`` del
+    WorkerFactory o un nodo ``output_validator``) que:
+    - extraiga del texto final números telefónicos (regex CO/intl.) y handles de redes (@usuario);
+    - los compare contra una allowlist derivada del bloque CONTACTO OFICIAL (soul/config);
+    - si aparece un teléfono o @ no autorizado, sustituya la respuesta por escalado a la dueña
+      o dispare handoff, sin depender solo del LLM del FactChecker.
+    LeilaAssistant hoy no activa Context-Guard (requiere ``catalog_retriever``); este chequeo
+    sería complementario y aplicable aunque ``fact_check`` esté deshabilitado.
 """
 
 from __future__ import annotations

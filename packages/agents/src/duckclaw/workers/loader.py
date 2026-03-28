@@ -11,11 +11,42 @@ from duckclaw.workers.manifest import WorkerSpec
 
 
 def load_system_prompt(spec: WorkerSpec) -> str:
-    """Load system_prompt.md from worker dir."""
-    path = spec.worker_dir / "system_prompt.md"
-    if path.is_file():
-        return path.read_text(encoding="utf-8").strip()
+    """
+    Carga el prompt del worker: si existe `soul.md`, se antepone (voz / políticas);
+    luego `system_prompt.md` (herramientas, SQL). Separador `---` entre bloques.
+
+    Nota: `domain_closure.md` (p. ej. LeilaAssistant) no se concatena aquí; el WorkerFactory
+    lo añade al **final** del prompt efectivo, después de la conciencia de tarea, para que el
+    cierre de dominio sea la última instrucción visible al modelo.
+    """
+    soul_path = spec.worker_dir / "soul.md"
+    sys_path = spec.worker_dir / "system_prompt.md"
+    parts: list[str] = []
+    if soul_path.is_file():
+        raw = soul_path.read_text(encoding="utf-8").strip()
+        if raw:
+            parts.append(raw)
+    if sys_path.is_file():
+        raw = sys_path.read_text(encoding="utf-8").strip()
+        if raw:
+            parts.append(raw)
+    if parts:
+        return "\n\n---\n\n".join(parts)
     return "Eres un asistente útil. Usa las herramientas disponibles cuando sea necesario."
+
+
+def append_domain_closure_block(base_prompt: str, spec: WorkerSpec) -> str:
+    """
+    Si existe ``domain_closure.md`` en el directorio del template, lo añade al final de
+    ``base_prompt`` (tras ``---``). Usado en WorkerFactory **después** de la conciencia de tarea.
+    """
+    path = spec.worker_dir / "domain_closure.md"
+    if not path.is_file():
+        return base_prompt
+    block = path.read_text(encoding="utf-8").strip()
+    if not block:
+        return base_prompt
+    return (base_prompt or "").rstrip() + "\n\n---\n\n" + block
 
 
 def load_schema_sql(spec: WorkerSpec) -> str:

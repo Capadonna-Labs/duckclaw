@@ -57,6 +57,38 @@ def _telegram_safe(text: str) -> str:
     return t
 
 
+def unescape_telegram_markdown_v2_layers(text: str, max_layers: int = 4) -> str:
+    """
+    Quita hasta ``max_layers`` capas de escape estilo MarkdownV2 (mismo juego de
+    caracteres que ``_telegram_safe``). Sirve para:
+
+    - Historial que reinyecta la respuesta HTTP ya escapada (n8n / cliente).
+    - Salidas del modelo que copian ``\\.``, ``\\!``, ``\\*`` del contexto.
+
+    Sin esto, ``_telegram_safe`` vuelve a escapar las barras y el texto crece
+    (p. ej. ``\\!`` → ``\\\\!`` → ``\\\\\\!``).
+    """
+    if not text:
+        return ""
+    esc = frozenset(_TELEGRAM_MD_ESCAPE)
+    t = str(text)
+    for _ in range(max(1, int(max_layers))):
+        out: list[str] = []
+        i = 0
+        while i < len(t):
+            if t[i] == "\\" and i + 1 < len(t) and t[i + 1] in esc:
+                out.append(t[i + 1])
+                i += 2
+            else:
+                out.append(t[i])
+                i += 1
+        t_new = "".join(out)
+        if t_new == t:
+            return t_new
+        t = t_new
+    return t
+
+
 def _chat_key(chat_id: Any, suffix: str) -> str:
     """Key for agent_config; supports numeric (Telegram) and string (API session_id)."""
     try:
@@ -2318,7 +2350,7 @@ def _set_global_config(db: Any, key: str, value: str) -> None:
 def get_effective_system_prompt(db: Any, worker_id: Optional[str] = None) -> str:
     """
     Devuelve el system prompt efectivo para un worker:
-    - Si worker_id está definido: 1) override system_prompt_<worker_id>, 2) system_prompt.md del template. No usa global.
+    - Si worker_id está definido: 1) override system_prompt_<worker_id>, 2) soul.md + system_prompt.md del template (ver load_system_prompt). No usa global.
     - Si worker_id vacío: global system_prompt o "".
     """
     wid = (worker_id or "").strip()

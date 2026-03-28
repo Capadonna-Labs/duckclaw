@@ -23,7 +23,7 @@ except ImportError:
 
 from duckclaw.utils.logger import format_chat_log_identity, log_tool_execution_sync, set_log_context
 from duckclaw.workers.manifest import WorkerSpec, load_manifest
-from duckclaw.workers.loader import load_system_prompt, load_skills, run_schema
+from duckclaw.workers.loader import append_domain_closure_block, load_system_prompt, load_skills, run_schema
 
 _NO_TASK_PATTERN = re.compile(
     r"^(hola|hi|hey|buenos?\s*d[ií]as?|buenas?\s*tardes?|buenas?\s*noches?|"
@@ -80,6 +80,12 @@ _TASK_AWARENESS_PROMPT = """
 Además:
 - Si no recibes una tarea concreta (mensaje vacío o solo saludos), pregunta: "¿Cuál es mi tarea?" y ofrece ejemplos de lo que puedes hacer según tu rol.
 - En tu cierre proactivo invita a usar fly commands: si hablaste de datos o ejecución sugiere /tasks o /team; invita a crear objetivos con /goals (por defecto están vacíos); si de configuración /prompt o /skills; en general /help para ver todos los comandos.
+"""
+
+# LeilaAssistant: canal retail; no mencionar comandos con / a la usuaria (ver soul / system_prompt).
+_LEILA_TASK_AWARENESS_PROMPT = """
+Además:
+- Si el mensaje es vacío o solo un saludo, responde cálido y pregunta en qué puedes ayudar (ver catálogo, tallas, dejar datos para avisos) usando **solo lenguaje natural**. Nunca cites comandos con `/` ni pidas a la clienta que los escriba.
 """
 
 
@@ -539,7 +545,14 @@ def build_worker_graph(
     has_homeostasis = bool(getattr(spec, "homeostasis_config", None))
     crm_config = getattr(spec, "crm_config", None) or {}
     crm_enabled = bool(crm_config.get("enabled", False))
-    effective_prompt = (system_prompt or "").strip() + "\n\n" + _TASK_AWARENESS_PROMPT.strip()
+    _task_block = (
+        _LEILA_TASK_AWARENESS_PROMPT.strip()
+        if (getattr(spec, "worker_id", None) or "").strip() == "LeilaAssistant"
+        else _TASK_AWARENESS_PROMPT.strip()
+    )
+    effective_prompt = (system_prompt or "").strip() + "\n\n" + _task_block
+    # Cierre de dominio = última instrucción al modelo (p. ej. LeilaAssistant/domain_closure.md).
+    effective_prompt = append_domain_closure_block(effective_prompt, spec)
 
     def prepare_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
         cfg = config or {}
@@ -577,10 +590,17 @@ def build_worker_graph(
                 messages.append(AIMessage(content=content))
         needs_task = state.get("homeostasis_hint") == "ask_task" or _is_no_task(incoming)
         if needs_task:
-            user_content = (
-                f"[El usuario dijo: '{incoming.strip() or '(vacío)'}'. No ha indicado una tarea concreta. "
-                "Pregúntale: ¿Cuál es mi tarea? Y ofrece ejemplos de lo que puedes hacer según tu rol.]"
-            )
+            if (getattr(spec, "worker_id", None) or "").strip() == "LeilaAssistant":
+                user_content = (
+                    f"[El usuario dijo: '{incoming.strip() or '(vacío)'}'. Es saludo o mensaje muy breve. "
+                    "Responde cordial como Leila Store, pregunta en qué puedes ayudar (catálogo, tallas, avisos) "
+                    "en lenguaje natural. No uses la frase «¿Cuál es mi tarea?» ni comandos con /.]"
+                )
+            else:
+                user_content = (
+                    f"[El usuario dijo: '{incoming.strip() or '(vacío)'}'. No ha indicado una tarea concreta. "
+                    "Pregúntale: ¿Cuál es mi tarea? Y ofrece ejemplos de lo que puedes hacer según tu rol.]"
+                )
         else:
             user_content = incoming
         messages.append(HumanMessage(content=user_content))
