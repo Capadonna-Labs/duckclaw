@@ -13,6 +13,7 @@ os.environ.setdefault("DUCKCLAW_REPO_ROOT", str(_repo_root))
 import duckdb
 import redis.asyncio as redis
 from core.config import settings
+from duckclaw.gateway_db import get_gateway_db_path
 from duckclaw.vaults import validate_user_db_path
 
 # Configuración de logging robusto
@@ -64,13 +65,47 @@ async def execute_write(conn: duckdb.DuckDBPyConnection, message: str):
         params = payload.get("params",[]) # <-- Línea completada
         target_db_path = str(payload.get("db_path") or settings.DUCKDB_PATH)
         user_id = str(payload.get("user_id") or "default")
+        tenant_raw = payload.get("tenant_id")
+        tenant_id = str(tenant_raw).strip() if tenant_raw is not None else None
+        if not tenant_id:
+            tenant_id = None
 
         if not query:
             logger.warning(f"[{task_id}] Payload inválido: No hay query SQL.")
             return
-        if not validate_user_db_path(user_id, target_db_path):
+        if not validate_user_db_path(user_id, target_db_path, tenant_id=tenant_id):
             logger.warning(f"[{task_id}] Rechazado: db_path fuera del directorio permitido del usuario.")
             return
+
+        try:
+            from duckclaw.shared_db_grants import path_is_under_shared_tree, user_may_access_shared_path
+
+            if path_is_under_shared_tree(target_db_path):
+                from duckclaw import DuckClaw
+
+                acl_path = get_gateway_db_path()
+                acl_con = DuckClaw(acl_path)
+                try:
+                    ok_grant = user_may_access_shared_path(
+                        acl_con,
+                        tenant_id=str(tenant_id or "default").strip() or "default",
+                        user_id=user_id,
+                        shared_db_path=target_db_path,
+                    )
+                finally:
+                    _ac = getattr(acl_con, "_con", None)
+                    if _ac is not None:
+                        try:
+                            _ac.close()
+                        except Exception:
+                            pass
+                if not ok_grant:
+                    logger.warning(
+                        f"[{task_id}] Rechazado: sin grant de base compartida (user={user_id})."
+                    )
+                    return
+        except Exception as exc:
+            logger.warning("[%s] ACL shared check skipped/failed: %s", task_id, exc)
 
         # Ejecutar contra la ruta objetivo (path-aware por bóveda).
         def _exec() -> None:

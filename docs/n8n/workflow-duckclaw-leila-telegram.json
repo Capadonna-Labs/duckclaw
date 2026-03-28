@@ -1,0 +1,85 @@
+{
+  "name": "DuckClaw Leila → Gateway (8181)",
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "description": "Telegram → POST al Leila-Gateway. Tras importar: credenciales Telegram + URL base en variable DUCKCLAW_LEILA_URL o edita el nodo HTTP (puerto 8181)."
+  },
+  "nodes": [
+    {
+      "parameters": {
+        "updates": ["message"]
+      },
+      "id": "tg-trigger-leila",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0],
+      "webhookId": "duckclaw-leila-telegram"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:8181/api/v1/agent/chat",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ message: $json.message?.text || '', chat_id: String($json.message?.chat?.id ?? ''), user_id: String($json.message?.from?.id ?? $json.message?.chat?.id ?? ''), username: ($json.message?.from?.username || $json.message?.from?.first_name || 'Usuario'), chat_type: ($json.message?.chat?.type || 'private'), tenant_id: 'Leila Store' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "http-leila-gateway",
+      "name": "DuckClaw API Gateway (Leila)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 0]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Telegram Trigger').item.json.message.chat.id }}",
+        "text": "={{ $json.response }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "id": "telegram-reply-leila",
+      "name": "Responder Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [560, 0]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "DuckClaw API Gateway (Leila)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DuckClaw API Gateway (Leila)": {
+      "main": [
+        [
+          {
+            "node": "Responder Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "versionId": "duckclaw-leila-v1"
+}

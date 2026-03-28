@@ -71,7 +71,7 @@ def _seed_agent_beliefs(db: Any, spec: WorkerSpec) -> None:
         pass
 
 
-def run_schema(db: Any, spec: WorkerSpec, seed_beliefs: bool = True) -> None:
+def run_schema(db: Any, spec: WorkerSpec, seed_beliefs: bool = True, apply_template_sql: bool = True) -> None:
     """Create isolated schema and run schema.sql. seed_beliefs=False evita rellenar agent_beliefs (p. ej. tras /goals --reset)."""
     schema = spec.schema_name
     # DuckDB: CREATE SCHEMA IF NOT EXISTS name;
@@ -79,6 +79,8 @@ def run_schema(db: Any, spec: WorkerSpec, seed_beliefs: bool = True) -> None:
     _ensure_agent_beliefs(db, schema)
     if seed_beliefs:
         _seed_agent_beliefs(db, spec)
+    if not apply_template_sql:
+        return
     sql = load_schema_sql(spec)
     if not sql:
         return

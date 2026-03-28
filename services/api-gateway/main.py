@@ -110,6 +110,18 @@ def _apply_db_path_from_api_gateways_pm2() -> None:
 
 _apply_db_path_from_api_gateways_pm2()
 
+# Gateways PM2 con una sola DuckDB por proceso (p. ej. TheMind, Leila): no mezclar con finanzdb1 del registry.
+_DEDICATED_DB_PM2_NAMES = frozenset({"TheMind-Gateway", "Leila-Gateway"})
+
+
+def _dedicated_gateway_vault_db_path() -> str | None:
+    if (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() not in _DEDICATED_DB_PM2_NAMES:
+        return None
+    gw_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
+    if not gw_db:
+        return None
+    return str(Path(gw_db).expanduser().resolve())
+
 try:
     from core.config import settings
 except ImportError:
@@ -242,8 +254,18 @@ async def lifespan(app: FastAPI):
             );
             """
         )
+        from duckclaw.shared_db_grants import ensure_user_shared_db_access_table
+
+        ensure_user_shared_db_access_table(db)
     except Exception as exc:
         _gateway_log.warning("Telegram Guard: no se pudo inicializar authorized_users: %s", exc)
+    try:
+        from duckclaw.graphs.graph_server import get_db
+        from duckclaw.forge import ensure_leila_mvp_schema
+
+        ensure_leila_mvp_schema(get_db())
+    except Exception as exc:
+        _gateway_log.warning("Leila MVP: no se pudo inicializar leila_products/leila_orders: %s", exc)
     try:
         ensure_vault_registry()
     except Exception as exc:
@@ -591,6 +613,25 @@ async def _authorize_or_reject(*, tenant_id: str, user_id: str, is_owner: bool) 
     )
 
 
+def _effective_tenant_id(request_tenant: str | None) -> str:
+    """
+    Tenant efectivo para este gateway. Si DUCKCLAW_GATEWAY_TENANT_ID está definido (p. ej. en PM2
+    para Leila-Gateway), sustituye el valor del body / default y unifica whitelist + logs.
+
+    Si la variable no llegó al proceso (PM2 sin reload), Leila-Gateway sigue el nombre de tenant
+    acordado en config/api_gateways_pm2.json: \"Leila Store\".
+    """
+    override = (os.getenv("DUCKCLAW_GATEWAY_TENANT_ID") or "").strip()
+    if override:
+        return override
+    if (os.getenv("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() == "Leila-Gateway":
+        return "Leila Store"
+    dbp = (os.getenv("DUCKCLAW_DB_PATH") or "").lower()
+    if "leiladb" in dbp:
+        return "Leila Store"
+    return (request_tenant or "default").strip() or "default"
+
+
 @app.post("/api/v1/agent/chat")
 @app.post("/api/v1/agent/{worker_id}/chat")
 async def agent_chat(
@@ -608,7 +649,7 @@ async def agent_chat(
     if body is None:
         body = ChatRequest(message="", chat_id="default", user_id="system", username="system", chat_type="private")
     session_id, session_source = _resolve_chat_session_id(body, http_request)
-    tenant_id = (body.tenant_id or "default").strip() or "default"
+    tenant_id = _effective_tenant_id(body.tenant_id)
     chat_ident = _chat_identity_label(session_id, body.username)
     set_log_context(tenant_id=tenant_id, worker_id="manager", chat_id=chat_ident)
     if session_source == "default" and not (body.chat_id or "").strip():
@@ -675,7 +716,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     """
     message = (payload.message or "").strip()
     session_id = (session_id or "default").strip() or "default"
-    tenant_id = (tenant_id or "default").strip() or "default"
+    tenant_id = _effective_tenant_id(tenant_id)
     # Campos opcionales: defaults resilientes
     chat_type = (payload.chat_type or "private").strip().lower() or "private"
     username = (payload.username or "Usuario").strip() or "Usuario"
@@ -685,14 +726,12 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
         user_id = (session_id or "").strip()
     vault_user_id = user_id or session_id
     _, vault_db_path = resolve_active_vault(vault_user_id)
-    # TheMind-Gateway: BD dedicada en PM2 (the_mind.duckdb). El registry multi-bóveda
-    # sigue apuntando a finanzdb1 para el mismo chat_id → lock si se usa aquí.
-    if (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() == "TheMind-Gateway":
-        gw_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
-        if gw_db:
-            vault_db_path = str(Path(gw_db).expanduser().resolve())
+    _ded_vault = _dedicated_gateway_vault_db_path()
+    if _ded_vault:
+        vault_db_path = _ded_vault
     history = payload.history or []
     is_system_prompt = bool(payload.is_system_prompt or False)
+    shared_db_path = (payload.shared_db_path or "").strip() or None
 
     # Observabilidad 2.1: fase orquestación HTTP → worker lógico "manager" (no el worker_id de ruta).
     chat_ident = _chat_identity_label(session_id, username)
@@ -701,14 +740,34 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
 
     # Telegram Guard: autoriza antes de ejecutar comandos (/team, /sandbox, etc.)
     # y antes de invocar cualquier lógica LangGraph.
+    owner_user_id = (os.getenv("DUCKCLAW_OWNER_ID") or os.getenv("DUCKCLAW_ADMIN_CHAT_ID") or "").strip()
+    is_owner = bool(owner_user_id and user_id and str(user_id).strip() == str(owner_user_id).strip())
     if not is_system_prompt:
-        owner_user_id = (os.getenv("DUCKCLAW_OWNER_ID") or os.getenv("DUCKCLAW_ADMIN_CHAT_ID") or "").strip()
-        is_owner = bool(owner_user_id and user_id and str(user_id).strip() == str(owner_user_id).strip())
         await _authorize_or_reject(
             tenant_id=tenant_id,
             user_id=user_id,
             is_owner=is_owner,
         )
+
+    if not is_system_prompt and not is_owner:
+        from duckclaw.graphs.graph_server import get_db
+        from duckclaw.shared_db_grants import path_is_under_shared_tree, user_may_access_shared_path
+
+        acl_db = get_db()
+        _candidates = {s for s in ((shared_db_path or "").strip(), (os.getenv("DUCKCLAW_SHARED_DB_PATH") or "").strip()) if s}
+        for candidate in _candidates:
+            if not path_is_under_shared_tree(candidate):
+                continue
+            if not user_may_access_shared_path(
+                acl_db,
+                tenant_id=tenant_id,
+                user_id=vault_user_id,
+                shared_db_path=candidate,
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Sin permiso para acceder a la base de datos compartida configurada.",
+                )
 
     msg_stripped = (message or "").strip()
     # No invocar el grafo con mensaje vacío (evita plan vacío y respuesta "¿Cuál es mi tarea?")
@@ -722,11 +781,20 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     if msg_stripped.startswith("/"):
         try:
             from duckclaw import DuckClaw
-            from duckclaw.graphs.on_the_fly_commands import handle_command
+            from duckclaw.graphs.on_the_fly_commands import handle_command, prepare_leila_fly_duckdb
 
             vpath = (vault_db_path or "").strip()
             Path(vpath).parent.mkdir(parents=True, exist_ok=True)
             fly_db = DuckClaw(vpath)
+            from duckclaw.graphs.graph_server import get_db as _fly_acl_db
+
+            prepare_leila_fly_duckdb(
+                fly_db,
+                vpath,
+                user_id=vault_user_id,
+                tenant_id=tenant_id,
+                acl_db=_fly_acl_db(),
+            )
             try:
                 cmd_reply = handle_command(
                     fly_db,
@@ -735,6 +803,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
                     requester_id=user_id,
                     tenant_id=tenant_id,
                     vault_user_id=vault_user_id,
+                    username=username,
                 )
             finally:
                 _con = getattr(fly_db, "_con", None)
@@ -797,7 +866,9 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
                 session_id,
                 tenant_id=tenant_id,
                 user_id=vault_user_id,
+                username=username,
                 vault_db_path=vault_db_path,
+                shared_db_path=shared_db_path,
                 is_system_prompt=is_system_prompt,
             )
         except Exception as exc:
@@ -869,7 +940,7 @@ async def _invoke_chat(payload: ChatRequest, worker_id: str, session_id: str, te
     )
     _gateway_log.info(
         "out(chat_id=%s): %s",
-        format_chat_id_for_terminal(session_id, as_repr=True),
+        format_chat_id_for_terminal(chat_ident, as_repr=True),
         _truncate_log(reply_text),
     )
     reply_text = _strip_markdown_bold(reply_text or "")
@@ -941,18 +1012,30 @@ async def enqueue_write(req: WriteRequest):
     task_id = str(uuid.uuid4())
     user_id = (req.user_id or "").strip() or "default"
     db_path = (req.db_path or "").strip()
-    if db_path and not validate_user_db_path(user_id, db_path):
+    tid = (req.tenant_id or "").strip() or None
+    if db_path and not validate_user_db_path(user_id, db_path, tenant_id=tid):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="db_path inválido para el usuario.",
         )
+    if db_path:
+        from duckclaw.shared_db_grants import path_is_under_shared_tree, user_may_access_shared_path
+        from duckclaw.graphs.graph_server import get_db
+
+        if path_is_under_shared_tree(db_path) and not user_may_access_shared_path(
+            get_db(),
+            tenant_id=str(tid or "default").strip() or "default",
+            user_id=user_id,
+            shared_db_path=db_path,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Sin permiso para escribir en esta base de datos compartida.",
+            )
     if not db_path:
-        if (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() == "TheMind-Gateway":
-            gw_db = (os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
-            if gw_db:
-                db_path = str(Path(gw_db).expanduser().resolve())
-            else:
-                _, db_path = resolve_active_vault(user_id)
+        _ded = _dedicated_gateway_vault_db_path()
+        if _ded:
+            db_path = _ded
         else:
             _, db_path = resolve_active_vault(user_id)
     payload = {

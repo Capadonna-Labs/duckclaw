@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -19,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 
 from duckclaw.forge.atoms.state import ManagerAgentState
 from duckclaw.utils.langsmith_trace import get_tracing_config
-from duckclaw.utils.logger import get_obs_logger, log_plan, log_sys, set_log_context
+from duckclaw.utils.logger import format_chat_log_identity, get_obs_logger, log_plan, log_sys, set_log_context
 
 _log = logging.getLogger(__name__)
 _obs = get_obs_logger()
@@ -37,6 +38,19 @@ def _plan_task(incoming: str, worker_id: str) -> tuple[str, Optional[str]]:
         return incoming or "", None
     t = text.lower()
     override: Optional[str] = None
+    # MVP Leila: saludos cortos → respuesta de tienda (evita tono “agente de investigación”).
+    if (worker_id or "").strip() == "LeilaAssistant":
+        plain = (incoming or "").strip()
+        if len(plain) <= 24 and re.match(
+            r"^(hola|hey|hi|hello|buen(as?|os)\s*(días|dias|tardes|noches)?|qué\s+tal|que\s+tal)[\s!?.¡¿]*$",
+            plain.lower(),
+        ):
+            return (
+                "TAREA: El cliente saluda. Preséntate en 2–3 frases como Leila Store (tienda de ropa): "
+                "tono cálido y directo. Menciona /catalogo para ver productos y /pedido <id> <talla> para pedir. "
+                "No digas que eres un agente de investigación ni listes herramientas genéricas.",
+                None,
+            )
     # Intención DB/tablas/nombre → si el rol es personalizable, usar finanz (especialista) si está disponible
     is_db_intent = (
         re.search(r"\b(nombre\s+de\s+la\s+db|db|tablas?|tables?|esquema|schema|estructura|disponibles)\b", t)
@@ -168,6 +182,98 @@ def _llm_plan(incoming: str) -> tuple[str, list[str]]:
     return title, tasks
 
 
+def _truncate_plan_title_words(title: str, max_words: int = 5) -> str:
+    """Recorta el título del plan a como mucho `max_words` palabras."""
+    words = (title or "").strip().split()
+    if not words:
+        return ""
+    return " ".join(words[:max_words])
+
+
+def _extract_json_object(text: str) -> Optional[dict[str, Any]]:
+    """Parsea JSON del texto completo o del primer objeto {...} embebido."""
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            obj = json.loads(raw[start : end + 1])
+            return obj if isinstance(obj, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _coerce_planner_payload(data: Any) -> tuple[str, list[str]]:
+    """Valida el dict del LLM; lanza ValueError si no cumple el contrato."""
+    if not isinstance(data, dict):
+        raise ValueError("planner payload is not an object")
+    title = data.get("plan_title")
+    if title is None or not str(title).strip():
+        raise ValueError("missing plan_title")
+    tasks_raw = data.get("tasks")
+    if tasks_raw is None:
+        tasks_list: list[str] = []
+    elif isinstance(tasks_raw, list):
+        tasks_list = [str(x).strip() for x in tasks_raw if str(x).strip()]
+    else:
+        raise ValueError("tasks must be a list")
+    return str(title).strip(), tasks_list
+
+
+def _llm_plan_from_model(llm: Any, incoming: str, planner_system_prompt: str) -> Optional[tuple[str, list[str]]]:
+    """
+    Invoca el LLM del Manager para obtener {"plan_title", "tasks"}.
+    Devuelve None si falla el invoke, el parse o el contrato (el caller usa heurística).
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    append = (os.environ.get("DUCKCLAW_MANAGER_PLANNER_SYSTEM_APPEND") or "").strip()
+    system_chunks = [planner_system_prompt.strip(), append]
+    system_chunks.append(
+        'Responde únicamente con JSON válido (sin markdown): '
+        '{"plan_title": "string", "tasks": ["string", ...]}'
+    )
+    system = "\n\n".join(c for c in system_chunks if c)
+    human = f"Mensaje del usuario:\n{(incoming or '').strip()}"
+    try:
+        resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=human)])
+    except Exception as exc:
+        _log.debug("manager planner LLM invoke failed: %s", exc)
+        return None
+    content: Any = getattr(resp, "content", None)
+    if content is None:
+        content = str(resp)
+    if isinstance(content, list):
+        content = "".join(
+            (p.get("text", "") if isinstance(p, dict) else str(p)) for p in content
+        )
+    raw_text = str(content).strip()
+    data = _extract_json_object(raw_text)
+    if data is None:
+        _log.debug("manager planner: no JSON object in model output")
+        return None
+    try:
+        title, tasks = _coerce_planner_payload(data)
+    except ValueError as exc:
+        _log.debug("manager planner: invalid payload: %s", exc)
+        return None
+    title = _truncate_plan_title_words(title, 5)
+    if not title:
+        return None
+    if not tasks:
+        clip = (incoming or "").strip()[:200]
+        tasks = [f"Resolver la solicitud del usuario: {clip}" if clip else "Resolver solicitud del usuario"]
+    return title, tasks
+
+
 def _task_summary_for_activity(incoming: str, planned_task: str) -> str:
     """Resumen corto de la tarea para /tasks (activity), no el planned_task completo."""
     t = (incoming or "").strip().lower()
@@ -198,6 +304,7 @@ def build_manager_graph(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     llm_base_url: Optional[str] = None,
+    planner_system_prompt: str = "",
 ) -> Any:
     """
     Construye el grafo manager: router -> invoke_worker.
@@ -206,7 +313,7 @@ def build_manager_graph(
     from langgraph.graph import END, StateGraph
     from duckclaw.graphs.on_the_fly_commands import (
         get_chat_state,
-        get_team_templates,
+        get_effective_team_templates,
         append_task_audit,
     )
     from duckclaw.graphs.activity import set_busy, set_idle
@@ -224,11 +331,17 @@ def build_manager_graph(
     troot = templates_root
 
     def router_node(state: dict) -> dict:
-        """Equipo del chat (get_team_templates) o todos los templates. El manager delega según el plan. Preserva incoming/history/chat_id."""
+        """Equipo efectivo: chat > tenant > env > todos. El manager delega según el plan. Preserva incoming/history/chat_id."""
         chat_id = state.get("chat_id") or ""
         tenant_id = state.get("tenant_id") or "default"
-        available = get_team_templates(db, chat_id) or list_workers(troot)
+        available = list(get_effective_team_templates(db, chat_id, tenant_id, troot))
+        preferred = (os.environ.get("DUCKCLAW_DEFAULT_WORKER_ID") or "").strip()
         assigned = available[0] if available else None
+        if preferred and available:
+            for wid in available:
+                if (wid or "").strip().lower() == preferred.lower():
+                    assigned = (wid or "").strip()
+                    break
         out = {"assigned_worker_id": assigned, "available_templates": available}
         # Preservar estado para nodos siguientes (por si el grafo hace merge sustituyendo)
         if "incoming" in state:
@@ -245,13 +358,21 @@ def build_manager_graph(
             out["user_id"] = state["user_id"]
         if "vault_db_path" in state:
             out["vault_db_path"] = state["vault_db_path"]
+        if "shared_db_path" in state:
+            out["shared_db_path"] = state["shared_db_path"]
+        if "username" in state:
+            out["username"] = state["username"]
         return out
 
     def plan_node(state: ManagerAgentState) -> ManagerAgentState:
         """Formula un plan / tarea clara, genera plan_title/tasks y opcionalmente asigna finanz para intenciones DB/tablas."""
         _tid = (state.get("tenant_id") or "default").strip() or "default"
         _cid = (state.get("chat_id") or "").strip() or "unknown"
-        set_log_context(tenant_id=_tid, worker_id="manager", chat_id=_cid)
+        set_log_context(
+            tenant_id=_tid,
+            worker_id="manager",
+            chat_id=format_chat_log_identity(_cid, state.get("username")),
+        )
         # Preservar incoming por si el estado no lo propaga (fallback: input, message)
         incoming = (state.get("incoming") or state.get("input") or state.get("message") or "").strip()
         available_plan = state.get("available_templates") or list_workers(troot)
@@ -260,8 +381,15 @@ def build_manager_graph(
         if not incoming:
             _log.warning("manager plan: incoming vacío en state (keys=%s)", list(state.keys()))
 
-        # Planner semántico: título + lista de tareas
-        plan_title, tasks = _llm_plan(incoming)
+        _psp = (planner_system_prompt or "").strip()
+        if llm is not None and _psp:
+            _parsed = _llm_plan_from_model(llm, incoming, _psp)
+            if _parsed:
+                plan_title, tasks = _parsed
+            else:
+                plan_title, tasks = _llm_plan(incoming)
+        else:
+            plan_title, tasks = _llm_plan(incoming)
 
         # Mantener lógica existente de ruteo / planned_task
         planned, override_worker = _plan_task(incoming, assigned)
@@ -299,6 +427,10 @@ def build_manager_graph(
             out["user_id"] = state["user_id"]
         if "vault_db_path" in state:
             out["vault_db_path"] = state["vault_db_path"]
+        if "shared_db_path" in state:
+            out["shared_db_path"] = state["shared_db_path"]
+        if "username" in state:
+            out["username"] = state["username"]
         # Actualizar activity para /tasks usando solo el título del plan cuando esté disponible
         plan_for_task = (plan_title or "").strip()
         if plan_for_task:
@@ -308,24 +440,27 @@ def build_manager_graph(
             activity_task = task_summary
         set_busy(state.get("chat_id") or "", task=activity_task, worker_id=out.get("assigned_worker_id", assigned))
 
-        # Log del plan para PM2 / stdout, incluyendo plan_title + tasks (compacto)
+        # Log del plan para PM2 / stdout: título + lista de tasks (worker en línea aparte)
         safe_title = (plan_title or "Sin título de plan").strip()
         if len(safe_title) > 80:
             safe_title = safe_title[:80] + "..."
         try:
-            tasks_preview = ", ".join((tasks or [])[:3])
+            _tlist = list(tasks or [])[:8]
+            tasks_preview = ", ".join(_tlist)
+            if len(tasks or []) > 8:
+                tasks_preview += ", …"
         except Exception:
             tasks_preview = ""
-        if len(tasks_preview) > 160:
-            tasks_preview = tasks_preview[:160] + "..."
-        _assigned_for_log = (out.get("assigned_worker_id") or assigned or "").strip() or "?"
+        if len(tasks_preview) > 200:
+            tasks_preview = tasks_preview[:200] + "…"
         log_plan(
             _obs,
-            "[%s] -> tasks: [%s] | heur: [%s]",
+            '"%s" | tasks: [%s]',
             safe_title or "(vacío)",
-            _assigned_for_log,
-            tasks_preview or "(sin tareas)",
+            tasks_preview if tasks_preview else "(sin tareas)",
         )
+        _assigned_for_log = (out.get("assigned_worker_id") or assigned or "").strip() or "?"
+        log_sys(_obs, "Worker elegido para el plan: %s", _assigned_for_log)
         return out
 
     def invoke_worker_node(state: ManagerAgentState, config: RunnableConfig) -> ManagerAgentState:
@@ -334,6 +469,7 @@ def build_manager_graph(
         tenant_id = state.get("tenant_id") or "default"
         user_id = state.get("user_id") or chat_id or "default"
         vault_db_path = (state.get("vault_db_path") or "").strip()
+        shared_db_path = (state.get("shared_db_path") or "").strip()
         incoming = (state.get("incoming") or state.get("input") or state.get("message") or "").strip()
         planned_task = (state.get("planned_task") or "").strip() or incoming
         plan_title = (state.get("plan_title") or "").strip() or None
@@ -358,7 +494,7 @@ def build_manager_graph(
         status = "SUCCESS"
         try:
             global _worker_graph_cache
-            worker_cache_key = f"{tenant_id}::{assigned}::{vault_db_path or db_path or ''}"
+            worker_cache_key = f"{tenant_id}::{assigned}::{vault_db_path or db_path or ''}::{shared_db_path}"
             if worker_cache_key not in _worker_graph_cache:
                 _worker_graph_cache[worker_cache_key] = _build_worker_graph(
                     assigned,
@@ -369,9 +505,14 @@ def build_manager_graph(
                     llm_model=llm_model or "",
                     llm_base_url=llm_base_url or "",
                     instance_name=tenant_id,  # Aislar por tenant (Forge/WorkerFactory)
+                    shared_db_path=shared_db_path or None,
                 )
             worker_graph = _worker_graph_cache[worker_cache_key]
-            set_log_context(tenant_id=tenant_id, worker_id=assigned, chat_id=chat_id or "unknown")
+            set_log_context(
+                tenant_id=tenant_id,
+                worker_id=assigned,
+                chat_id=format_chat_log_identity(chat_id or "unknown", state.get("username")),
+            )
             log_sys(_obs, "Delegación: manager -> %s", assigned)
             raw_sb = get_chat_state(db, chat_id, "sandbox_enabled")
             sb_on = (raw_sb or "").strip().lower() in ("true", "1", "on", "sí", "si")
@@ -391,7 +532,9 @@ def build_manager_graph(
                 "chat_id": chat_id,
                 "tenant_id": tenant_id,
                 "user_id": user_id,
+                "username": (state.get("username") or "").strip(),
                 "vault_db_path": vault_db_path,
+                "shared_db_path": shared_db_path,
             }
             trace_cfg = get_tracing_config(
                 tenant_id,

@@ -1,0 +1,18 @@
+# LeilaAssistant — MVP Asistente de Leila (tienda de ropa, Telegram)
+# Spec: specs/features/Asistente de Leila — MVP Telegram.md
+name: LeilaAssistant
+id: LeilaAssistant
+schema_name: LeilaAssistant
+topology: general
+read_only: false
+forge_context:
+  # Catálogo compartido (mismo .duckdb para todos los clientes del tenant). Definir en PM2/host.
+  shared_db_path_env: DUCKCLAW_SHARED_DB_PATH
+  apply_main_schema_to_shared: true
+allowed_tables:
+  - leila_products
+  - leila_orders
+llm:
+  required: true
+  temperature: 0.3
+skills: []

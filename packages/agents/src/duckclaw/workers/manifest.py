@@ -120,6 +120,13 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         allowed_tables = [t.strip() for t in allowed_tables.split(",") if t.strip()]
     read_only = bool(data.get("read_only", False))
 
+    forge_shared_db_path_env: Optional[str] = None
+    forge_apply_schema_to_shared = False
+    fc = data.get("forge_context")
+    if isinstance(fc, dict):
+        forge_shared_db_path_env = (fc.get("shared_db_path_env") or "").strip() or None
+        forge_apply_schema_to_shared = bool(fc.get("apply_main_schema_to_shared"))
+
     return WorkerSpec(
         worker_id=worker_id,
         name=name,
@@ -140,6 +147,8 @@ def load_manifest(worker_id: str, templates_root: Optional[Path] = None) -> Work
         homeostasis_config=homeostasis_config,
         context_guard_config=context_guard_config,
         crm_config=crm_config,
+        forge_shared_db_path_env=forge_shared_db_path_env,
+        forge_apply_schema_to_shared=forge_apply_schema_to_shared,
     )
 
 
@@ -196,6 +205,7 @@ class WorkerSpec:
         "topology", "skills_list", "allowed_tables", "read_only", "worker_dir",
         "github_config", "research_config", "tailscale_config", "sft_config",
         "ibkr_config", "inference_config", "homeostasis_config", "context_guard_config", "crm_config",
+        "forge_shared_db_path_env", "forge_apply_schema_to_shared",
     )
 
     def __init__(
@@ -219,6 +229,8 @@ class WorkerSpec:
         homeostasis_config: Optional[dict] = None,
         context_guard_config: Optional[dict] = None,
         crm_config: Optional[dict] = None,
+        forge_shared_db_path_env: Optional[str] = None,
+        forge_apply_schema_to_shared: bool = False,
     ):
         self.worker_id = worker_id
         self.name = name
@@ -239,3 +251,5 @@ class WorkerSpec:
         self.homeostasis_config = homeostasis_config
         self.context_guard_config = context_guard_config
         self.crm_config = crm_config
+        self.forge_shared_db_path_env = forge_shared_db_path_env
+        self.forge_apply_schema_to_shared = forge_apply_schema_to_shared

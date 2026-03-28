@@ -61,6 +61,7 @@ from duckclaw.utils.langsmith_trace import get_tracing_config
 from duckclaw.utils.logger import (
     configure_structured_logging,
     extract_usage_from_messages,
+    format_chat_log_identity,
     structured_log_context,
 )
 
@@ -162,10 +163,32 @@ def _get_or_build_graph() -> Any:
             )
             """
         )
+        from duckclaw.shared_db_grants import ensure_user_shared_db_access_table
+
+        ensure_user_shared_db_access_table(db)
     except Exception as exc:
         # No romper el server: si falla por lock/permiso, el guard bloqueará todo,
         # y el problema se verá en logs/observabilidad.
         print(f"[telegram_guard] Could not ensure authorized_users table: {exc}", flush=True)
+    try:
+        from duckclaw.forge import ensure_leila_mvp_schema
+
+        leila_shared = (os.environ.get("DUCKCLAW_SHARED_DB_PATH") or "").strip()
+        if leila_shared:
+            ldb = DuckClaw(leila_shared)
+            try:
+                ensure_leila_mvp_schema(ldb)
+            finally:
+                _lcon = getattr(ldb, "_con", None)
+                if _lcon is not None:
+                    try:
+                        _lcon.close()
+                    except Exception:
+                        pass
+        else:
+            ensure_leila_mvp_schema(db)
+    except Exception as exc:
+        print(f"[leila_mvp] Could not ensure leila_products/leila_orders: {exc}", flush=True)
 
     llm = build_llm(provider, model, base_url)
     if llm is None:
@@ -242,12 +265,6 @@ class InvokeResponse(BaseModel):
     usage_tokens: dict[str, int] | None = None
 
 
-def _chat_log_identity(chat_id: str, username: str | None) -> str:
-    cid = str(chat_id or "").strip() or "unknown"
-    uname = str(username or "").strip()
-    return f"@{uname} ({cid})" if uname else cid
-
-
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
 @app.get("/", summary="Info del servidor")
@@ -290,7 +307,7 @@ async def invoke(req: InvokeRequest):
 
     t0 = time.monotonic()
     uid = (req.user_id or "").strip() or req.chat_id
-    chat_ident = _chat_log_identity(req.chat_id, req.username)
+    chat_ident = format_chat_log_identity(req.chat_id, req.username)
     try:
         with structured_log_context(tenant_id=req.tenant_id, chat_id=chat_ident, worker_id="manager"):
             # El grafo manager se encarga de mapear state → subgrafos; general_graph usará username/chat_type.
@@ -301,6 +318,7 @@ async def invoke(req: InvokeRequest):
                 req.chat_id,
                 tenant_id=req.tenant_id,
                 user_id=uid,
+                username=req.username,
             )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Error en el grafo: {exc}")
@@ -330,7 +348,7 @@ async def stream(req: InvokeRequest):
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
             uid = (req.user_id or "").strip() or req.chat_id
-            chat_ident = _chat_log_identity(req.chat_id, req.username)
+            chat_ident = format_chat_log_identity(req.chat_id, req.username)
             with structured_log_context(tenant_id=req.tenant_id, chat_id=chat_ident, worker_id="manager"):
                 invoke_result = await _ainvoke(
                     graph,
@@ -339,6 +357,7 @@ async def stream(req: InvokeRequest):
                     req.chat_id,
                     tenant_id=req.tenant_id,
                     user_id=uid,
+                    username=req.username,
                 )
             reply = invoke_result.get("reply", "") or ""
             for word in reply.split(" "):
@@ -382,7 +401,9 @@ async def _ainvoke(
     *,
     tenant_id: str = "default",
     user_id: str | None = None,
+    username: str | None = None,
     vault_db_path: str | None = None,
+    shared_db_path: str | None = None,
     is_system_prompt: bool | None = False,
 ) -> dict:
     """
@@ -400,7 +421,9 @@ async def _ainvoke(
         "chat_id": chat_id,
         "tenant_id": tenant_id,
         "user_id": (user_id or "").strip() or str(chat_id),
+        "username": (username or "").strip(),
         "vault_db_path": (vault_db_path or "").strip() or "",
+        "shared_db_path": (shared_db_path or "").strip() or "",
     }
     if is_system_prompt:
         state["is_system_prompt"] = True
@@ -418,6 +441,10 @@ async def _ainvoke(
     out: dict[str, Any] = {"reply": reply, "messages": messages}
     if usage:
         out["usage_tokens"] = usage
+    # Manager → subagente: propagar para logs/auditoría en el API Gateway (evita [finanz] cuando el worker real es otro).
+    for _k in ("assigned_worker_id", "plan_title", "_audit_done"):
+        if _k in result:
+            out[_k] = result[_k]
     return out
 
 

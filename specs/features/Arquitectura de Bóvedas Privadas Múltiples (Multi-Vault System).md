@@ -26,12 +26,19 @@ Los archivos se organizarán por carpetas de usuario para facilitar backups gran
 ```text
 db/
 ├── system.duckdb
-└── private/
-    └── {user_id}/
-        ├── default.duckdb      # Bóveda inicial
-        ├── inversiones.duckdb  # Bóveda adicional
-        └── trabajo.duckdb      # Bóveda adicional
+├── private/
+│   └── {user_id}/              # Una carpeta por usuario; varios .duckdb (vault_id)
+│       ├── default.duckdb
+│       ├── inversiones.duckdb
+│       └── trabajo.duckdb
+└── shared/
+    ├── {user_id}/              # Compat: mismas rutas que slug de usuario (p. ej. catálogo por chat)
+    │   └── leiladb1.duckdb
+    └── {tenant_id}/            # Datos compartidos del tenant (slug sanitizado; p. ej. leila_store)
+        └── catalogo.duckdb
 ```
+
+`validate_user_db_path` en `duckclaw.vaults` autoriza escrituras solo si el `.duckdb` cae bajo `private/{user_id}/`, `shared/{user_id}/` o `shared/{tenant_id}/` (este último solo cuando el payload incluye el mismo `tenant_id` efectivo que en la petición autorizada).
 
 ## 4. Especificación de Skill: `VaultManager`
 
@@ -44,17 +51,20 @@ Esta skill permite al usuario (y al agente) manipular su ecosistema de datos.
         *   Actualiza `is_active` en la tabla `user_vaults`.
         *   Notifica al Gateway para reiniciar la sesión del agente con el nuevo `ATTACH`.
 
-## 5. Lógica de Conexión Dinámica (Forge Context)
+## 5. Lógica de Conexión Dinámica (Forge / DynamicContext)
 
-El `DynamicContextManager` en el `Forge` resuelve la ruta en cada invocación:
+La resolución de rutas ocurre en `build_worker_graph` (`packages/agents/.../workers/factory.py`):
 
-1.  **Resolución:** `SELECT vault_id FROM user_vaults WHERE user_id = ? AND is_active = TRUE`.
-2.  **Fallback:** Si no hay ninguna activa, usar `default.duckdb`.
-3.  **Inyección:**
+1.  **Bóveda activa (HTTP/Gateway):** el `vault_db_path` llega desde `resolve_active_vault(user_id)` o equivalente dedicado.
+2.  **Contexto dual (opcional):** si el `manifest.yaml` declara `forge_context.shared_db_path_env`, se lee esa variable de entorno y se ejecuta un segundo `ATTACH ... AS shared`. La petición puede sobrescribir con `shared_db_path` en el body del chat.
+3.  **Inyección SQL (best-effort):**
     ```sql
-    -- El agente siempre usa el alias 'private'
-    ATTACH 'db/private/{user_id}/{vault_id}.duckdb' AS private;
+    DETACH private;  -- si aplica
+    ATTACH '<vault_db_path>' AS private;
+    DETACH shared;
+    ATTACH '<shared_duckdb>' AS shared;  -- solo si la ruta compartida está resuelta y distinta de la privada
     ```
+    Las herramientas `read_sql` del worker reintentan calificando tablas con `main`, `private` y `shared` cuando hay allow-list.
 
 ## 6. Interfaz de Control: Fly Command `/vault`
 
@@ -75,6 +85,6 @@ El `db-writer` debe ser ahora **Path-Aware** (consciente de la ruta).
 
 ## 8. Garantías de Habeas Data y Seguridad
 
-1.  **Aislamiento Físico:** Un usuario nunca puede ejecutar un `ATTACH` a una carpeta que no sea la suya (`db/private/{user_id}/`). El Gateway debe validar la ruta antes de enviarla al `db-writer`.
+1.  **Aislamiento Físico:** Un usuario nunca puede ejecutar un `ATTACH` fuera de `db/private/{user_id}/`, `db/shared/{user_id}/` o `db/shared/{tenant_id}/` coherente con el tenant de la petición. El Gateway y el DB Writer validan la ruta antes de encolar/ejecutar.
 2.  **Destrucción Granular:** El usuario puede solicitar borrar una bóveda específica (`/vault rm <id>`). El sistema elimina el archivo físico y los registros en `user_vaults`, cumpliendo con el derecho de supresión sin afectar las otras bóvedas del usuario.
 3.  **Portabilidad:** El comando `duckops export --vault <id>` empaqueta el archivo `.duckdb` y lo entrega al usuario, garantizando la soberanía total sobre su información.

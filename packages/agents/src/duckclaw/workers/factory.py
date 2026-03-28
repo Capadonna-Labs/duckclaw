@@ -21,8 +21,8 @@ try:
 except ImportError:
     RunnableConfig = Any  # type: ignore[misc, assignment]
 
-from duckclaw.utils.logger import log_tool_execution_sync, set_log_context
-from duckclaw.workers.manifest import WorkerSpec, load_manifest, get_worker_dir
+from duckclaw.utils.logger import format_chat_log_identity, log_tool_execution_sync, set_log_context
+from duckclaw.workers.manifest import WorkerSpec, load_manifest
 from duckclaw.workers.loader import load_system_prompt, load_skills, run_schema
 
 _NO_TASK_PATTERN = re.compile(
@@ -83,6 +83,78 @@ Además:
 """
 
 
+def _escape_attach_path(path: str) -> str:
+    return str(path).replace("'", "''")
+
+
+def _resolve_shared_db_path(spec: WorkerSpec, override: Optional[str]) -> Optional[str]:
+    """
+    Segundo archivo .duckdb (catálogo compartido). Solo si el manifest declara
+    forge_context.shared_db_path_env; el body `shared_db_path` puede sustituir la ruta
+    sin depender del env.
+    """
+    env_key = (getattr(spec, "forge_shared_db_path_env", None) or "").strip()
+    if not env_key:
+        return None
+    raw = (override or "").strip()
+    if raw:
+        return raw
+    return (os.environ.get(env_key) or "").strip() or None
+
+
+def _apply_forge_attaches(db: Any, private_path: str, shared_path: Optional[str]) -> None:
+    """ATTACH bóveda privada y opcionalmente una segunda base como catálogo compartido."""
+    esc_p = _escape_attach_path(private_path)
+    try:
+        try:
+            db.execute("DETACH private")
+        except Exception:
+            pass
+        db.execute(f"ATTACH '{esc_p}' AS private")
+    except Exception as exc:
+        _log.debug("forge ATTACH private skipped: %s", exc)
+    sp = (shared_path or "").strip()
+    try:
+        try:
+            db.execute("DETACH shared")
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if not sp:
+        return
+    try:
+        if Path(sp).resolve() == Path(private_path).resolve():
+            return
+    except Exception:
+        if os.path.abspath(sp) == os.path.abspath(private_path):
+            return
+    Path(sp).parent.mkdir(parents=True, exist_ok=True)
+    esc_s = _escape_attach_path(sp)
+    try:
+        db.execute(f"ATTACH '{esc_s}' AS shared")
+    except Exception as exc:
+        _log.warning("forge ATTACH shared failed (%s): %s", sp, exc)
+
+
+def _bootstrap_shared_main_schema(db: Any, spec: WorkerSpec) -> None:
+    """Replica declaraciones main.* de schema.sql en shared.main.* (MVP Leila / catálogo)."""
+    if not getattr(spec, "forge_apply_schema_to_shared", False):
+        return
+    from duckclaw.workers.loader import _split_sql, load_schema_sql
+
+    sql = load_schema_sql(spec)
+    if not sql.strip():
+        return
+    adapted = sql.replace("CREATE TABLE IF NOT EXISTS main.", "CREATE TABLE IF NOT EXISTS shared.main.")
+    for stmt in _split_sql(adapted):
+        if stmt.strip():
+            try:
+                db.execute(stmt)
+            except Exception as exc:
+                _log.debug("forge shared schema stmt skipped: %s", exc)
+
+
 def _get_db_path(worker_id: str, instance_name: Optional[str], base_path: Optional[str]) -> str:
     """Resolve DuckDB path for this worker instance."""
     base = (base_path or os.environ.get("DUCKCLAW_DB_PATH") or "").strip()
@@ -108,6 +180,7 @@ def _identity_fields(state: dict) -> dict:
         "chat_id": state.get("chat_id") or state.get("session_id"),
         "tenant_id": state.get("tenant_id") or "default",
         "user_id": state.get("user_id") or "",
+        "username": (state.get("username") or "").strip(),
         "vault_db_path": state.get("vault_db_path") or "",
     }
 
@@ -180,6 +253,12 @@ def _build_worker_tools(db: Any, spec: WorkerSpec) -> list:
                 if try_main != q:
                     try:
                         return db.query(try_main)
+                    except Exception:
+                        pass
+                try_shared = _qualify_allowed_tables(q, "shared")
+                if try_shared != q:
+                    try:
+                        return db.query(try_shared)
                     except Exception:
                         pass
                 try_private = _qualify_allowed_tables(q, "private")
@@ -302,6 +381,7 @@ class WorkerFactory:
         llm_provider: Optional[str] = None,
         llm_model: Optional[str] = None,
         llm_base_url: Optional[str] = None,
+        shared_db_path: Optional[str] = None,
     ) -> Any:
         """
         Build and return a compiled LangGraph for the worker.
@@ -316,6 +396,7 @@ class WorkerFactory:
             llm_provider=llm_provider,
             llm_model=llm_model,
             llm_base_url=llm_base_url,
+            shared_db_path=shared_db_path,
         )
 
 
@@ -329,6 +410,7 @@ def build_worker_graph(
     llm_provider: Optional[str] = None,
     llm_model: Optional[str] = None,
     llm_base_url: Optional[str] = None,
+    shared_db_path: Optional[str] = None,
 ) -> Any:
     """
     Build a compiled LangGraph for a worker. Used by AgentAssembler._build_worker
@@ -336,21 +418,17 @@ def build_worker_graph(
     """
     spec = load_manifest(worker_id, templates_root)
     path = _get_db_path(worker_id, instance_name, db_path)
+    shared_resolved = _resolve_shared_db_path(spec, shared_db_path)
 
     from duckclaw import DuckClaw
     db = DuckClaw(path)
-    # Multi-vault: exponer siempre la bóveda activa bajo alias SQL `private`.
-    # Es best-effort para no romper workers existentes.
-    try:
-        escaped_path = str(path).replace("'", "''")
-        try:
-            db.execute("DETACH private")
-        except Exception:
-            pass
-        db.execute(f"ATTACH '{escaped_path}' AS private")
-    except Exception:
-        pass
-    run_schema(db, spec)
+    _apply_forge_attaches(db, path, shared_resolved)
+    if shared_resolved:
+        _bootstrap_shared_main_schema(db, spec)
+    skip_primary_sql = bool(
+        shared_resolved and getattr(spec, "forge_apply_schema_to_shared", False)
+    )
+    run_schema(db, spec, apply_template_sql=not skip_primary_sql)
 
     system_prompt = load_system_prompt(spec)
     tools = _build_worker_tools(db, spec)
@@ -610,7 +688,8 @@ def build_worker_graph(
         def agent_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
             _chat_ctx = state.get("chat_id") or state.get("session_id") or "default"
             _tenant_ctx = (state.get("tenant_id") or "").strip() or "default"
-            set_log_context(tenant_id=_tenant_ctx, worker_id=worker_id, chat_id=str(_chat_ctx).strip() or "default")
+            _log_chat = format_chat_log_identity(str(_chat_ctx).strip() or "default", state.get("username"))
+            set_log_context(tenant_id=_tenant_ctx, worker_id=worker_id, chat_id=_log_chat)
             _wl = _worker_log_label(worker_id)
             cfg = config or {}
             incoming = (
@@ -673,7 +752,8 @@ def build_worker_graph(
     def tools_node(state: dict, config: Optional[RunnableConfig] = None) -> dict:
         _chat_ctx = state.get("chat_id") or state.get("session_id") or "default"
         _tenant_ctx = (state.get("tenant_id") or "").strip() or "default"
-        set_log_context(tenant_id=_tenant_ctx, worker_id=worker_id, chat_id=str(_chat_ctx).strip() or "default")
+        _log_chat = format_chat_log_identity(str(_chat_ctx).strip() or "default", state.get("username"))
+        set_log_context(tenant_id=_tenant_ctx, worker_id=worker_id, chat_id=_log_chat)
         _wl = _worker_log_label(worker_id)
         messages = state["messages"]
         last = messages[-1]

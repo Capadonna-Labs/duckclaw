@@ -71,6 +71,15 @@ def main():
             PRIMARY KEY (tenant_id, user_id)
         )
     """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS main.user_shared_db_access (
+            tenant_id VARCHAR NOT NULL,
+            user_id VARCHAR NOT NULL,
+            resource_key VARCHAR NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (tenant_id, user_id, resource_key)
+        )
+    """)
 
     # Finance_worker: schema + agent_beliefs + schema.sql
     db.execute("CREATE SCHEMA IF NOT EXISTS finance_worker")

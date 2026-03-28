@@ -10,6 +10,7 @@ import functools
 import hashlib
 import logging
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -26,18 +27,10 @@ _DEFAULT_TENANT = "default"
 _DEFAULT_WORKER = "manager"
 _DEFAULT_CHAT = "unknown"
 
-# ANSI: mismo esquema que el API Gateway (`services/api-gateway/main.py`) para chat_id reconocible en PM2.
+# ANSI: columna chat en PM2; identidad `@alias (id)` usa dos tonos (alias vs id) y paleta 6×6×6 (216) para baja colisión.
 _ANSI_RESET = "\033[0m"
-_CHAT_ID_COLORS = (
-    "\033[38;5;39m",  # blue
-    "\033[38;5;45m",  # cyan
-    "\033[38;5;82m",  # green
-    "\033[38;5;190m",  # yellow
-    "\033[38;5;208m",  # orange
-    "\033[38;5;201m",  # magenta
-    "\033[38;5;135m",  # purple
-    "\033[38;5;51m",  # aqua
-)
+# `@Nombre (session_id)` — el id puede ser numérico Telegram u otro texto sin paréntesis anidados.
+_LOG_IDENTITY_RE = re.compile(r"^@(?P<alias>.+) \((?P<cid>[^)]+)\)\s*\Z")
 
 
 def _terminal_chat_id_colors_enabled() -> bool:
@@ -48,23 +41,78 @@ def _terminal_chat_id_colors_enabled() -> bool:
     return True
 
 
+def _identity_seed(kind: str, alias: str, cid: str) -> int:
+    blob = f"{kind}\x1e{alias}\x1e{cid}".encode("utf-8", errors="ignore")
+    return int(hashlib.sha1(blob).hexdigest(), 16)
+
+
+def _ansi_fg_216_idx(idx: int) -> str:
+    """Color 16–231 (cubo RGB 6×6×6)."""
+    n = idx % 216
+    r = n // 36
+    g = (n % 36) // 6
+    b = n % 6
+    code = 16 + 36 * r + 6 * g + b
+    return f"\033[38;5;{code}m"
+
+
+def _pair_distinct_alias_id_colors(alias: str, cid: str) -> tuple[str, str]:
+    """Dos colores distintos: uno derivado del alias+id, otro del id+alias (semillas distintas)."""
+    ia = _identity_seed("alias", alias, cid) % 216
+    ib = _identity_seed("id", alias, cid) % 216
+    if ia == ib:
+        ib = (ib + 83) % 216
+    return _ansi_fg_216_idx(ia), _ansi_fg_216_idx(ib)
+
+
 def chat_id_color_code(chat_id: str) -> str:
-    """Código ANSI de primer plano estable por chat_id (hash SHA1)."""
-    cid = (chat_id or "default").encode("utf-8", errors="ignore")
-    idx = int(hashlib.sha1(cid).hexdigest(), 16) % len(_CHAT_ID_COLORS)
-    return _CHAT_ID_COLORS[idx]
+    """Código ANSI estable por cadena (paleta 216 colores; compatible con logs históricos)."""
+    seed = _identity_seed("plain", str(chat_id or "default"), "")
+    return _ansi_fg_216_idx(seed)
+
+
+def format_chat_identity_column_for_terminal(display: str) -> str:
+    """
+    Columna de log con color: si es `@alias (id)`, colorea @alias e id por separado (siempre distintos);
+    si no coincide el patrón, un solo color derivado de la cadena completa (216 tonos).
+    """
+    s = (display or "").strip()
+    if not s:
+        s = "unknown"
+    if not _terminal_chat_id_colors_enabled():
+        return s
+    m = _LOG_IDENTITY_RE.match(s)
+    if m:
+        alias, cid = m.group("alias"), m.group("cid")
+        ca, cb = _pair_distinct_alias_id_colors(alias, cid)
+        return f"{ca}@{alias}{_ANSI_RESET} ({cb}{cid}{_ANSI_RESET})"
+    return f"{chat_id_color_code(s)}{s}{_ANSI_RESET}"
+
+
+def format_chat_log_identity(chat_id: str | None, username: str | None = None) -> str:
+    """
+    Etiqueta humana para la tercera columna de logs PM2: @Alias (chat_id) si hay alias;
+    si no, solo chat_id (misma convención que el API Gateway).
+    """
+    cid = str(chat_id if chat_id is not None else "").strip() or "unknown"
+    uname = str(username or "").strip()
+    return f"@{uname} ({cid})" if uname else cid
 
 
 def format_chat_id_for_terminal(chat_id: str, *, as_repr: bool = False) -> str:
     """
-    chat_id con color para logs en terminal (PM2). Desactivar con NO_COLOR o DUCKCLAW_LOG_NO_COLOR=1.
-    ``as_repr=True`` emula ``repr()`` del valor (como en ``out(chat_id=...)``).
+    Identidad de chat con color para terminal (PM2). Con alias: dos tonos (@nombre vs id).
+    ``as_repr=True`` envuelve en comillas ASCII (como ``out(chat_id=...)``); el interior sigue coloreado.
+    Desactivar con NO_COLOR o DUCKCLAW_LOG_NO_COLOR=1.
     """
     raw = chat_id if chat_id is not None else "default"
-    display = repr(raw) if as_repr else str(raw)
+    s = str(raw)
     if not _terminal_chat_id_colors_enabled():
-        return display
-    return f"{chat_id_color_code(str(raw))}{display}{_ANSI_RESET}"
+        return repr(s) if as_repr else s
+    inner = format_chat_identity_column_for_terminal(s)
+    if as_repr:
+        return f"'{inner}'"
+    return inner
 
 def set_log_context(
     *,
@@ -141,7 +189,7 @@ class DuckClawStructuredFormatter(logging.Formatter):
         if not hasattr(record, "chat_id"):
             record.chat_id = ctx_chat.get()
         cid = str(getattr(record, "chat_id", None) or ctx_chat.get() or "unknown")
-        setattr(record, "chat_id_colored", format_chat_id_for_terminal(cid, as_repr=False))
+        setattr(record, "chat_id_colored", format_chat_identity_column_for_terminal(cid))
         return super().format(record)
 
 

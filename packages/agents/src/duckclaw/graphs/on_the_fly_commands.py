@@ -17,6 +17,7 @@ from duckclaw.vaults import (
     remove_vault as _vault_remove,
     resolve_active_vault as _vault_resolve_active,
     switch_vault as _vault_switch,
+    validate_user_db_path,
 )
 
 from duckclaw.forge.skills.the_mind_outbound import (
@@ -249,6 +250,87 @@ def set_team_templates(db: Any, chat_id: Any, template_ids: list) -> None:
     set_chat_state(db, chat_id, "team_templates", json.dumps([str(x).strip() for x in template_ids]))
 
 
+_TENANT_TEAM_KEY_PREFIX = "tenant_team:"
+
+
+def _tenant_team_config_key(tenant_id: Any) -> str:
+    tid = str(tenant_id or "default").strip() or "default"
+    return f"{_TENANT_TEAM_KEY_PREFIX}{tid}"
+
+
+def get_tenant_team_templates(db: Any, tenant_id: Any) -> list:
+    """Equipo por defecto para todo el tenant (misma DuckDB compartida). Vacío = no hay override a nivel tenant."""
+    raw = _get_global_config(db, _tenant_team_config_key(tenant_id))
+    if not raw:
+        return []
+    try:
+        out = json.loads(raw)
+        return out if isinstance(out, list) else []
+    except Exception:
+        return []
+
+
+def set_tenant_team_templates(db: Any, tenant_id: Any, template_ids: list) -> None:
+    """Persiste el equipo default del tenant en agent_config (clave global)."""
+    _set_global_config(
+        db,
+        _tenant_team_config_key(tenant_id),
+        json.dumps([str(x).strip() for x in template_ids]),
+    )
+
+
+def get_effective_team_templates(
+    db: Any, chat_id: Any, tenant_id: Any, templates_root: Any = None
+) -> list:
+    """
+    Equipo que ve el manager para delegar, en orden:
+    1) team_templates del chat
+    2) team_templates del tenant (admin vía /workers)
+    3) DUCKCLAW_GATEWAY_TEAM_TEMPLATES (coma-separado, ids canónicos tras resolver)
+    4) todos los templates (list_workers)
+    """
+    from duckclaw.workers.factory import list_workers
+
+    chat_team = get_team_templates(db, chat_id)
+    if chat_team:
+        return list(chat_team)
+    tid = str(tenant_id or "default").strip() or "default"
+    tenant_team = get_tenant_team_templates(db, tid)
+    if tenant_team:
+        return list(tenant_team)
+    env_raw = (os.environ.get("DUCKCLAW_GATEWAY_TEAM_TEMPLATES") or "").strip()
+    if env_raw:
+        all_t = list_workers(templates_root)
+        out: list[str] = []
+        for part in env_raw.split(","):
+            p = part.strip()
+            if not p:
+                continue
+            c = _resolve_template_id(all_t, p)
+            if c:
+                out.append(c)
+        if out:
+            return out
+    return list_workers(templates_root)
+
+
+def _sync_tenant_team_if_admin(
+    db: Any,
+    *,
+    tenant_id: Any,
+    requester_id: Any,
+    template_ids: list,
+) -> None:
+    """Si el requester es admin del tenant, replica el equipo del chat como default del tenant."""
+    tid = str(tenant_id or "").strip()
+    rid = str(requester_id or "").strip()
+    if not tid or not rid:
+        return
+    if _get_authorized_role(db, tenant_id=tid, user_id=rid) != "admin":
+        return
+    set_tenant_team_templates(db, tid, template_ids)
+
+
 def _resolve_template_id(available: list, user_input: str) -> Optional[str]:
     """Resuelve el input del usuario (p. ej. 'themindcrupier') al id canónico del template (p. ej. 'ThemindCrupier'). Case-insensitive."""
     if not available or not (user_input or "").strip():
@@ -260,18 +342,35 @@ def _resolve_template_id(available: list, user_input: str) -> Optional[str]:
     return None
 
 
-def execute_team(db: Any, chat_id: Any, args: str) -> str:
-    """/workers [id1 id2 ...] [--add id...] [--rm worker_id]: equipo del chat. Sin args: lista. Con ids: reemplaza. --add: añade; --rm: quita uno."""
+def execute_team(
+    db: Any,
+    chat_id: Any,
+    args: str,
+    *,
+    tenant_id: Any = None,
+    requester_id: Any = None,
+) -> str:
+    """/workers [id1 id2 ...] [--add id...] [--rm worker_id]: equipo del chat. Sin args: lista. Con ids: reemplaza. --add: añade; --rm: quita uno. Admin: también actualiza el equipo default del tenant."""
     from duckclaw.workers.factory import list_workers
     all_templates = list_workers()
+    tid = str(tenant_id or "default").strip() or "default"
     team = get_team_templates(db, chat_id)
     if not args or not args.strip():
-        display_list = team if team else all_templates
-        if not display_list:
+        effective = get_effective_team_templates(db, chat_id, tid, None)
+        if not effective:
             return _telegram_safe("No hay templates en forge/templates. Añade al menos uno.")
-        label = _telegram_safe("Equipo (este chat):") if team else _telegram_safe("Equipo: todos los templates")
-        lines = "\n".join(f"\\- {_telegram_safe(w)}" for w in display_list)
-        hint = _telegram_safe("Reemplazar: /workers id1 id2 | Añadir: /workers --add id | Quitar: /workers --rm id | Ver todos: /roles")
+        if team:
+            label = _telegram_safe("Equipo (este chat):")
+        elif get_tenant_team_templates(db, tid):
+            label = _telegram_safe("Equipo del tenant (todos los chats sin override):")
+        elif (os.environ.get("DUCKCLAW_GATEWAY_TEAM_TEMPLATES") or "").strip():
+            label = _telegram_safe("Equipo (DUCKCLAW_GATEWAY_TEAM_TEMPLATES):")
+        else:
+            label = _telegram_safe("Equipo: todos los templates")
+        lines = "\n".join(f"\\- {_telegram_safe(w)}" for w in effective)
+        hint = _telegram_safe(
+            "Reemplazar: /workers id1 id2 | Añadir: /workers --add id | Quitar: /workers --rm id | Ver todos: /roles"
+        )
         return f"🦆 {label}\n{lines}\n\n{hint}"
     raw = args.strip()
     # --rm <worker_id>
@@ -285,6 +384,9 @@ def execute_team(db: Any, chat_id: Any, args: str) -> str:
         if len(new_team) == len(current):
             return _telegram_safe(f"'{canonical}' no está en el equipo. Equipo actual: {', '.join(current) or 'todos'}")
         set_team_templates(db, chat_id, new_team)
+        _sync_tenant_team_if_admin(
+            db, tenant_id=tid, requester_id=requester_id, template_ids=new_team
+        )
         return _telegram_safe(f"✅ Quitado {canonical} del equipo. Quedan: {', '.join(new_team) or 'ninguno (el manager usará todos)'}.")
     # --add id1 id2 ... (insert/appendix al equipo actual)
     if raw.startswith("--add ") or raw.strip() == "--add":
@@ -305,6 +407,9 @@ def execute_team(db: Any, chat_id: Any, args: str) -> str:
             if not any((x or "").strip().lower() == c.lower() for x in current):
                 current.append(c)
         set_team_templates(db, chat_id, current)
+        _sync_tenant_team_if_admin(
+            db, tenant_id=tid, requester_id=requester_id, template_ids=current
+        )
         return _telegram_safe(f"✅ Añadidos al equipo: {', '.join(valid)}. Equipo: {', '.join(current)}.")
     # id1 id2 ... → reemplazar equipo
     ids_raw = [x.strip() for x in raw.split() if x.strip()]
@@ -319,6 +424,7 @@ def execute_team(db: Any, chat_id: Any, args: str) -> str:
     if invalid:
         return _telegram_safe(f"Templates no encontrados: {', '.join(invalid)}. Disponibles: {', '.join(all_templates)}")
     set_team_templates(db, chat_id, valid)
+    _sync_tenant_team_if_admin(db, tenant_id=tid, requester_id=requester_id, template_ids=valid)
     return _telegram_safe(f"✅ Equipo de este chat: {', '.join(valid)}. El manager delegará solo a estos.")
 
 
@@ -482,7 +588,69 @@ def execute_team_whitelist(db: Any, tenant_id: Any, requester_id: Any, args: str
         target_label = _player_label(uname, target_uid, db=db, tenant_id=tid)
         return _telegram_safe(f"✅ Añadido {target_label} (role=user) al tenant '{tid}'.")
 
-    return _telegram_safe("Uso: /team | /team --add <user_id> [username] | /team --rm <user_id>")
+    if raw == "--shared-list" or raw.startswith("--shared-list"):
+        if not rid:
+            return _telegram_safe("❌ Acceso denegado.")
+        role = _get_authorized_role(db, tenant_id=tid, user_id=rid)
+        if role != "admin":
+            return _telegram_safe("❌ Acceso denegado: solo administradores pueden listar permisos de bases compartidas.")
+        from duckclaw.shared_db_grants import list_shared_grants_for_tenant
+
+        grants = list_shared_grants_for_tenant(db, tenant_id=tid)
+        if not grants:
+            return _telegram_safe(
+                f"🗂 No hay filas en user_shared_db_access para tenant '{tid}'. "
+                "Sin filas, cualquier usuario whitelist puede usar rutas shared válidas (compat). "
+                "Admin: /team --shared-grant <user_id> <resource_key> (ej. default o *)."
+            )
+        lines = []
+        for g in grants:
+            lines.append(
+                _telegram_safe(
+                    f"\\- user={g.get('user_id')} key={g.get('resource_key')} at={g.get('created_at')}"
+                )
+            )
+        body = "\n".join(lines)
+        return _telegram_safe(f"🗂 Bases compartidas permitidas (tenant '{tid}'):\n\n{body}")
+
+    if raw.startswith("--shared-grant "):
+        if not rid:
+            return _telegram_safe("❌ Acceso denegado.")
+        role = _get_authorized_role(db, tenant_id=tid, user_id=rid)
+        if role != "admin":
+            return _telegram_safe("❌ Acceso denegado: solo administradores.")
+        rest = raw[len("--shared-grant ") :].strip().split(None, 1)
+        if len(rest) < 2:
+            return _telegram_safe("Uso: /team --shared-grant <user_id> <resource_key>\nresource_key: default, * (todas), o slug (env DUCKCLAW_SHARED_RESOURCE_<SLUG>).")
+        target_uid, rkey = rest[0], rest[1].strip()
+        from duckclaw.shared_db_grants import upsert_shared_grant, validate_resource_key
+
+        if not validate_resource_key(rkey):
+            return _telegram_safe("resource_key inválido (usa default, * o slug alfanumérico).")
+        upsert_shared_grant(db, tenant_id=tid, user_id=target_uid, resource_key=rkey)
+        return _telegram_safe(f"✅ Grant shared '{rkey}' → user {target_uid} (tenant '{tid}').")
+
+    if raw.startswith("--shared-revoke "):
+        if not rid:
+            return _telegram_safe("❌ Acceso denegado.")
+        role = _get_authorized_role(db, tenant_id=tid, user_id=rid)
+        if role != "admin":
+            return _telegram_safe("❌ Acceso denegado: solo administradores.")
+        rest = raw[len("--shared-revoke ") :].strip().split(None, 1)
+        if len(rest) < 2:
+            return _telegram_safe("Uso: /team --shared-revoke <user_id> <resource_key>")
+        target_uid, rkey = rest[0], rest[1].strip()
+        from duckclaw.shared_db_grants import delete_shared_grant, validate_resource_key
+
+        if not validate_resource_key(rkey):
+            return _telegram_safe("resource_key inválido.")
+        delete_shared_grant(db, tenant_id=tid, user_id=target_uid, resource_key=rkey)
+        return _telegram_safe(f"✅ Revocado shared '{rkey}' para user {target_uid}.")
+
+    return _telegram_safe(
+        "Uso: /team | /team --add ... | /team --rm ... | /team --shared-list | "
+        "/team --shared-grant <user_id> <resource_key> | /team --shared-revoke <user_id> <resource_key>"
+    )
 
 
 def execute_roles(db: Any, chat_id: Any) -> str:
@@ -2248,10 +2416,196 @@ def execute_prompt(db: Any, chat_id: Any, args: str) -> str:
     return _telegram_safe(f"System prompt de {worker_id}:\n{preview}\n\nPara cambiar: /prompt {worker_id} --change <texto>")
 
 
+def _leila_fly_commands_enabled() -> bool:
+    """Comandos /catalogo, /pedido, /ayuda del MVP Leila (spec: Asistente de Leila — MVP Telegram)."""
+    if (os.environ.get("DUCKCLAW_LEILA_FLY_COMMANDS") or "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return (os.environ.get("DUCKCLAW_PM2_PROCESS_NAME") or "").strip() == "Leila-Gateway"
+
+
+def _leila_shared_catalog_path() -> str:
+    return (os.environ.get("DUCKCLAW_SHARED_DB_PATH") or "").strip()
+
+
+def prepare_leila_fly_duckdb(
+    db: Any,
+    vault_path: str,
+    *,
+    user_id: Any,
+    tenant_id: Any,
+    acl_db: Any | None = None,
+) -> None:
+    """
+    Si el catálogo vive en DUCKCLAW_SHARED_DB_PATH, ATTACH como `shared` sobre la conexión
+    ya abierta a la bóveda del usuario (misma convención que build_worker_graph).
+    acl_db: DuckDB del gateway (tabla user_shared_db_access); None omite ACL de grants (tests).
+    """
+    if not _leila_fly_commands_enabled():
+        return
+    shared = _leila_shared_catalog_path()
+    if not shared:
+        return
+    uid = (str(user_id or "").strip() or "default")
+    tid = (str(tenant_id or "").strip() or None)
+    if not validate_user_db_path(uid, shared, tenant_id=tid):
+        _obs = get_obs_logger()
+        try:
+            log_fly(_obs, "Leila fly: ruta shared rechazada por validate_user_db_path (user_id=%s)", uid)
+        except Exception:
+            pass
+        return
+    if acl_db is not None:
+        from duckclaw.shared_db_grants import user_may_access_shared_path
+
+        tid_grant = str(tenant_id or "default").strip() or "default"
+        if not user_may_access_shared_path(
+            acl_db, tenant_id=tid_grant, user_id=uid, shared_db_path=shared
+        ):
+            _obs = get_obs_logger()
+            try:
+                log_fly(_obs, "Leila fly: sin grant user_shared_db_access (user_id=%s tenant=%s)", uid, tid_grant)
+            except Exception:
+                pass
+            return
+    from duckclaw.workers.factory import _apply_forge_attaches
+
+    _apply_forge_attaches(db, (vault_path or "").strip(), shared)
+    setattr(db, "_leila_shared_catalog_attached", True)
+
+
+def _leila_products_rel(db: Any) -> str:
+    """Tabla calificada tras prepare_leila_fly_duckdb (ATTACH `shared`)."""
+    if getattr(db, "_leila_shared_catalog_attached", False):
+        return "shared.main.leila_products"
+    return "main.leila_products"
+
+
+def _leila_orders_rel(db: Any) -> str:
+    if getattr(db, "_leila_shared_catalog_attached", False):
+        return "shared.main.leila_orders"
+    return "main.leila_orders"
+
+
+def execute_leila_catalogo(db: Any, chat_id: Any) -> str:
+    """/catalogo — productos activos (shared.main o main según DUCKCLAW_SHARED_DB_PATH)."""
+    _ = chat_id
+    rel = _leila_products_rel(db)
+    try:
+        raw = db.query(
+            f"SELECT id, nombre, descripcion, tallas, precio, foto_url "
+            f"FROM {rel} WHERE activo = true ORDER BY nombre"
+        )
+        rows = json.loads(raw) if isinstance(raw, str) else (raw or [])
+    except Exception as e:
+        return _telegram_safe(f"No pude leer el catálogo: {e}")
+    if not rows:
+        return _telegram_safe("Catálogo vacío por ahora. Vuelve pronto.")
+    lines: list[str] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        tid = str(r.get("id") or "").strip()
+        nom = str(r.get("nombre") or "").strip() or "(sin nombre)"
+        precio = r.get("precio")
+        tallas = r.get("tallas") or []
+        if isinstance(tallas, list):
+            ts = ", ".join(str(x) for x in tallas)
+        else:
+            ts = str(tallas)
+        desc = str(r.get("descripcion") or "").strip()
+        if len(desc) > 100:
+            desc = desc[:100] + "..."
+        foto = str(r.get("foto_url") or "").strip()
+        extra = f"\n  {desc}" if desc else ""
+        if foto:
+            extra += f"\n  foto: {foto[:80]}"
+        lines.append(f"• {nom}\n  id: {tid} — precio: {precio}\n  Tallas: {ts}{extra}")
+    body = "\n\n".join(lines)
+    return _telegram_safe(
+        f"Leila Store — Catálogo\n\n{body}\n\nPedido: /pedido id_producto talla"
+    )
+
+
+def execute_leila_pedido(
+    db: Any,
+    chat_id: Any,
+    args: str,
+    *,
+    requester_id: Any = None,
+    tenant_id: Any = None,
+    username: str = "",
+) -> str:
+    """/pedido <producto_id> <talla> [nota] — inserta en leila_orders (shared.main si hay catálogo compartido)."""
+    parts = (args or "").strip().split(None, 2)
+    if len(parts) < 2:
+        return _telegram_safe("Uso: /pedido id_producto talla [nota opcional]")
+    product_id = parts[0].strip()
+    talla = parts[1].strip()
+    nota = (parts[2].strip() if len(parts) > 2 else "") or ""
+    cid = str(chat_id if chat_id is not None else "").strip() or "unknown"
+
+    def _esc(s: str) -> str:
+        return (s or "").replace("'", "''")[:2000]
+
+    pid_sql = _esc(product_id)
+    talla_sql = _esc(talla)
+    nota_sql = _esc(nota)
+    cid_sql = _esc(cid)
+    prod_rel = _leila_products_rel(db)
+    ord_rel = _leila_orders_rel(db)
+    try:
+        chk = db.query(f"SELECT nombre, activo FROM {prod_rel} WHERE id = '{pid_sql}' LIMIT 1")
+        rows = json.loads(chk) if isinstance(chk, str) else (chk or [])
+        if not rows or not isinstance(rows[0], dict):
+            return _telegram_safe(f"No encontré el producto {product_id}. Usa /catalogo para ver ids.")
+        act = rows[0].get("activo")
+        if act is False:
+            return _telegram_safe("Ese producto no está disponible.")
+        nombre = str(rows[0].get("nombre") or product_id)
+        db.execute(
+            f"INSERT INTO {ord_rel} (chat_id, producto_id, talla, nota) "
+            f"VALUES ('{cid_sql}', '{pid_sql}', '{talla_sql}', '{nota_sql}')"
+        )
+    except Exception as e:
+        return _telegram_safe(f"No pude registrar el pedido: {e}")
+
+    user_label = (username or "").strip() or (str(requester_id).strip() if requester_id is not None else cid)
+    admin_txt = f"Nuevo pedido: {nombre} talla {talla} de {user_label}"
+
+    admin_chat = (
+        (os.environ.get("DUCKCLAW_LEILA_ADMIN_CHAT_ID") or os.environ.get("DUCKCLAW_ADMIN_CHAT_ID") or "")
+        .strip()
+    )
+    if admin_chat:
+        tid = str(tenant_id or "default").strip() or "default"
+        send_telegram_dm(
+            admin_chat,
+            f"🛍️ {admin_txt}",
+            username=str(user_label),
+            db=db,
+            tenant_id=tid,
+        )
+
+    return _telegram_safe(
+        f"Pedido recibido: {nombre}, talla {talla}. Te contactamos pronto."
+    )
+
+
+def execute_leila_ayuda() -> str:
+    """/ayuda — comprar en Leila Store (solo gateway Leila)."""
+    return _telegram_safe(
+        "Leila Store — cómo comprar\n\n"
+        "• /catalogo — ver productos, tallas y precios\n"
+        "• /pedido id talla — registrar tu pedido (opcional: una nota al final)\n"
+        "• Pregunta por tallas o combinar piezas; si algo es especial, dilo y lo vemos con Leila.\n\n"
+        "Comandos generales del bot: /help"
+    )
+
+
 def execute_help(db: Any, chat_id: Any) -> str:
     """/help: lista los fly commands disponibles."""
     lines = [
-        (_telegram_safe("/team"), _telegram_safe("Whitelist: ver o agregar/quitar autorizados del tenant")),
+        (_telegram_safe("/team"), _telegram_safe("Whitelist + grants bases compartidas (--shared-*)")),
         (_telegram_safe("/vault"), _telegram_safe("Bóvedas privadas: ver/listar/crear/cambiar/eliminar")),
         (_telegram_safe("/workers"), _telegram_safe("Equipo (templates): ver o definir workers para este chat")),
         (_telegram_safe("/roles"), _telegram_safe("Ver todos los trabajadores virtuales (templates)")),
@@ -2278,6 +2632,14 @@ def execute_help(db: Any, chat_id: Any) -> str:
         (_telegram_safe("/approve"), _telegram_safe("Aprobar última acción")),
         (_telegram_safe("/reject"), _telegram_safe("Rechazar última acción")),
     ]
+    if _leila_fly_commands_enabled():
+        lines.extend(
+            [
+                (_telegram_safe("/catalogo"), _telegram_safe("Leila: ver catálogo de productos")),
+                (_telegram_safe("/pedido id talla"), _telegram_safe("Leila: registrar pedido")),
+                (_telegram_safe("/ayuda"), _telegram_safe("Leila: cómo comprar")),
+            ]
+        )
     block = "\n".join(f"{cmd} \\- {desc}" for cmd, desc in lines)
     return f"🦆 {_telegram_safe('Fly commands:')}\n\n{block}"
 
@@ -2299,8 +2661,17 @@ def _dispatch_fly_command(
     requester_id: Any = None,
     tenant_id: Any = None,
     vault_user_id: Any = None,
+    username: str = "",
 ) -> Optional[str]:
     """Ejecuta un comando fly ya parseado (sin contexto de logging)."""
+    if name == "catalogo" and _leila_fly_commands_enabled():
+        return execute_leila_catalogo(db, chat_id)
+    if name == "pedido" and _leila_fly_commands_enabled():
+        return execute_leila_pedido(
+            db, chat_id, args, requester_id=requester_id, tenant_id=tenant_id, username=username
+        )
+    if name == "ayuda" and _leila_fly_commands_enabled():
+        return execute_leila_ayuda()
     if name == "help":
         return execute_help(db, chat_id)
     if name == "role":
@@ -2314,7 +2685,9 @@ def _dispatch_fly_command(
     if name == "vault":
         return execute_vault(args, vault_user_id=vault_user_id or requester_id or chat_id)
     if name == "workers":
-        return execute_team(db, chat_id, args)
+        return execute_team(
+            db, chat_id, args, tenant_id=tenant_id, requester_id=requester_id
+        )
     if name == "skills":
         return execute_skills_list(db, chat_id, args)
     if name == "forget":
@@ -2516,6 +2889,7 @@ def handle_command(
     requester_id: Any = None,
     tenant_id: Any = None,
     vault_user_id: Any = None,
+    username: str = "",
 ) -> Optional[str]:
     """
     Middleware: si el mensaje es un comando on-the-fly, ejecuta y retorna la respuesta.
@@ -2540,6 +2914,7 @@ def handle_command(
             requester_id=requester_id,
             tenant_id=tenant_id,
             vault_user_id=vault_user_id,
+            username=username or "",
         )
         if out is not None:
             log_fly(_fly_log, "/%s -> %s", name, _fly_reply_preview(out))

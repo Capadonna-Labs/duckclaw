@@ -344,6 +344,7 @@ def _run_bot() -> None:
                 requester_id=user_id,
                 tenant_id="default",
                 vault_user_id=user_id,
+                username=str(username or ""),
             )
             if cmd_reply is not None:
                 _log(f"📋 Comando ejecutado chat={chat_id}")

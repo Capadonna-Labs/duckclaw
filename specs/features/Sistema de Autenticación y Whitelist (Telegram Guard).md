@@ -20,6 +20,25 @@ CREATE TABLE IF NOT EXISTS authorized_users (
 );
 ```
 
+### A.1 Bases compartidas (ACL por usuario)
+
+Tabla **`main.user_shared_db_access`**: define qué `resource_key` de catálogo compartido puede usar cada `(tenant_id, user_id)` además del sandbox de rutas (`validate_user_db_path`).
+
+```sql
+CREATE TABLE IF NOT EXISTS main.user_shared_db_access (
+    tenant_id VARCHAR NOT NULL,
+    user_id VARCHAR NOT NULL,
+    resource_key VARCHAR NOT NULL,  -- 'default' → DUCKCLAW_SHARED_DB_PATH; '*' → comodín; otro → DUCKCLAW_SHARED_RESOURCE_<KEY>
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, user_id, resource_key)
+);
+```
+
+- **Sin filas** para un usuario: compatibilidad — basta con ruta válida bajo `db/shared/`.
+- **Con una o más filas**: debe existir `*` o un `resource_key` cuya ruta resuelta coincida con el `.duckdb` compartido solicitado.
+
+Gestión vía **`/team --shared-list`**, **`--shared-grant`**, **`--shared-revoke`** (solo `role=admin`). El gateway y el db-writer consultan esta tabla antes de usar `DUCKCLAW_SHARED_DB_PATH` / `shared_db_path` / escrituras bajo `db/shared/`.
+
 ### B. Estructura en Redis (Caché de Validación)
 *   **Key:** `whitelist:{tenant_id}:{user_id}`
 *   **Value:** `role` (string)

@@ -342,12 +342,37 @@ def remove_vault(user_id: Any, vault_id: str) -> bool:
     return True
 
 
-def validate_user_db_path(user_id: Any, db_path: str) -> bool:
+def validate_user_db_path(user_id: Any, db_path: str, tenant_id: Any | None = None) -> bool:
+    """
+    Acepta rutas .duckdb bajo:
+    - db/private/{user_id}/
+    - db/shared/{user_id}/  (compat: misma carpeta que el slug del usuario)
+    - db/shared/{tenant_id}/ cuando se pasa tenant_id (bóvedas compartidas por tenant)
+    """
     uid = _safe_user_id(user_id)
-    root = user_vault_dir(uid).resolve()
+    private_root = user_vault_dir(uid).resolve()
+    roots: list[Path] = [
+        private_root,
+        (db_root() / "shared" / uid).resolve(),
+    ]
+    if tenant_id is not None and str(tenant_id).strip():
+        tid = _safe_user_id(tenant_id)
+        if tid:
+            roots.append((db_root() / "shared" / tid).resolve())
     path = Path(db_path).resolve()
-    try:
-        path.relative_to(root)
-        return path.suffix.lower() == ".duckdb"
-    except Exception:
+    if path.suffix.lower() != ".duckdb":
         return False
+    for root in roots:
+        try:
+            path.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def shared_tenant_dir(tenant_id: Any) -> Path:
+    """Directorio db/shared/{tenant_slug}/ (mkdir incluso si aún no hay .duckdb)."""
+    path = db_root() / "shared" / _safe_user_id(tenant_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path

@@ -193,6 +193,10 @@ class AgentAssembler:
         llm_provider = overrides.get("llm_provider") or ""
         llm_model = overrides.get("llm_model") or ""
         llm_base_url = overrides.get("llm_base_url") or ""
+        _psp = overrides.get("planner_system_prompt")
+        if _psp is None:
+            _psp = self.spec.get("planner_system_prompt") or ""
+        planner_system_prompt = str(_psp).strip() if _psp else ""
         return build_manager_graph(
             db,
             llm,
@@ -201,6 +205,7 @@ class AgentAssembler:
             llm_provider=llm_provider,
             llm_model=llm_model,
             llm_base_url=llm_base_url,
+            planner_system_prompt=planner_system_prompt,
         )
 
     def _build_worker(self, db: Any, llm: Any, **overrides) -> Any:
@@ -222,6 +227,10 @@ class AgentAssembler:
         if troot is None:
             troot = Path(__file__).resolve().parent.parent.parent
 
+        _sdp = overrides.get("shared_db_path")
+        shared_db_path = str(_sdp).strip() if _sdp else None
+        if not shared_db_path:
+            shared_db_path = None
         return build_worker_graph(
             worker_id,
             db_path,
@@ -231,4 +240,5 @@ class AgentAssembler:
             llm_provider=overrides.get("llm_provider"),
             llm_model=overrides.get("llm_model"),
             llm_base_url=overrides.get("llm_base_url"),
+            shared_db_path=shared_db_path,
         )
